@@ -2,6 +2,10 @@
 
 이 채널은 같은 Pi 프로세스 event bus의 선택적 presence 입력입니다. durable transport나 cross-process API가 아니며 reload/세션 종료 후 생산자는 필요하면 현재 상태를 다시 발행해야 합니다.
 
+![ready 광고부터 엄격한 update 검증, retained 상태 렌더링과 session teardown까지의 이벤트 흐름](diagram/event-flow.svg)
+
+이 이미지는 흐름 개요이며, 아래의 세부 계약을 대체하지 않습니다. Mermaid 원본: [`diagram/event-flow.mmd`](diagram/event-flow.mmd)
+
 ## 엄격한 V1 객체
 
 payload와 중첩 객체에는 다음 키 외의 키를 넣을 수 없습니다. 모든 문자열(`sessionId`, `source.id`, `source.label`, `source.kind`, 선택 `progress.label`)은 1–96 Unicode code points이고 C0/C1 control, bidi·방향성 제어 문자를 포함할 수 없습니다.

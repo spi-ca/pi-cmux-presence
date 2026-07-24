@@ -16,6 +16,10 @@ bun pm pack --dry-run
 
 ## 구조
 
+![Pi lifecycle에서 Unix 소켓 cmux 출력까지의 presence 아키텍처](diagram/architecture.svg)
+
+이 이미지는 구조 개요이며, 세부 동작은 아래 문서를 대체하지 않습니다. Mermaid 원본: [`diagram/architecture.mmd`](diagram/architecture.mmd)
+
 - `index.ts`: 안정적인 Pi 확장 진입점
 - `src/presence.ts`: 설정을 해석하고 runtime과 hook adapter를 조합하는 얇은 composition root
 - `src/hooks.ts`: Pi lifecycle과 process-local event observer 등록

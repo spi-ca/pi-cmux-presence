@@ -1,0 +1,21 @@
+%% Diagram source: docs/diagram/event-flow.mmd
+sequenceDiagram
+  participant R as PresenceRuntime
+  participant B as Process-local event bus
+  participant P as Producer
+  participant V as Strict validator
+  participant S as Retained state
+  participant U as Presentation
+  participant C as cmux
+
+  R->>B: session start: ready v1
+  B->>P: ready advertisement
+  P->>B: update or optional replay
+  B->>R: update v1
+  R->>V: validate object and session
+  Note over V: reject reserved source, stale fence,<br/>or source limit exceeded
+  V->>S: replace accepted source state
+  S->>U: current retained states
+  U->>C: deterministic status / progress / attention
+  R->>S: session teardown cleanup
+  R->>C: clear owned output

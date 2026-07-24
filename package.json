@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "main": "index.ts",
-  "files": ["index.ts", "src/**/*", "docs/**/*.md", "AGENTS.md", "README.md", "LICENSE"],
+  "files": ["index.ts", "src/**/*", "docs/**/*.md", "docs/diagram/**/*", "AGENTS.md", "README.md", "LICENSE"],
   "keywords": ["pi-package", "cmux", "presence"],
   "pi": {
     "extensions": ["./index.ts"]
