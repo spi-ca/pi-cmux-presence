@@ -1,0 +1,102 @@
+# 설정과 소켓 조건
+
+## 환경 변수
+
+잘못되었거나 비어 있는 `PI_CMUX_PRESENCE_*` 값은 기본값으로 돌아갑니다. 기본값이 `true`인 항목은 오타여도 활성화되므로 끌 때는 지원되는 false 값을 정확히 사용해야 합니다.
+
+| 변수 | 기본값 | 허용값·효과 |
+| --- | ---: | --- |
+| `PI_CMUX_PRESENCE_ENABLED` | `true` | boolean, 확장 전체 활성화 |
+| `PI_CMUX_PRESENCE_TIMEOUT_MS` | `1000` | 정수 100–30000, 개별 연결·응답 제한 |
+| `PI_CMUX_PRESENCE_MAX_QUEUE` | `16` | 정수 1–128, 대기 요청 상한 |
+| `PI_CMUX_PRESENCE_PROGRESS` | `true` | boolean, V1 progress set/clear 소유. `false`이면 초기화·종료 clear를 포함해 progress를 전혀 변경하지 않음 |
+| `PI_CMUX_PRESENCE_NOTIFICATIONS` | `true` | boolean, capability가 있을 때 V2 notification |
+| `PI_CMUX_PRESENCE_FLASH` | `true` | boolean, capability가 있을 때 V2 flash |
+| `PI_CMUX_PRESENCE_LOG` | `false` | boolean, V1 attention log |
+| `PI_CMUX_PRESENCE_SIDEBAR` | `true` | boolean, V1 status 쓰기 |
+| `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE` | `true` | boolean, Pi PID와 `running`/`idle` native lifecycle |
+| `PI_CMUX_PRESENCE_FEED` | `false` | boolean, 제한된 V2 feed 이벤트 |
+| `PI_CMUX_PRESENCE_META_BLOCK` | `false` | boolean, 숫자만 있는 V1 meta block |
+| `PI_CMUX_PRESENCE_AUTO_TITLE` | `false` | boolean, Pi session name 기반 V2 workspace title |
+| `PI_CMUX_PRESENCE_RESUME_FALLBACK` | `false` | boolean, 소유 확인 V2 resume binding |
+| `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` | `1500` | 정수 0–60000, 내장 Pi 최종 status 제거 대기 |
+| `PI_CMUX_PRESENCE_MAX_LABEL_CHARS` | `96` | 정수 16–256, 전송 label의 Unicode code-point 축약 상한. 목적지별 UTF-8 byte 상한도 별도 적용 |
+
+boolean은 trim 및 대소문자 무시 후 `1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`만 인식합니다. 정수는 trim 뒤 ASCII 숫자만 받고 안전한 정수와 표의 포함 범위를 만족해야 합니다. 부호·소수·지수 표기와 범위 밖 값은 기본값입니다.
+
+## capability와 공식 hook 우선순위
+
+초기화는 V2 `system.capabilities`를 조회합니다. `notification.create_for_surface`, `surface.trigger_flash`, `feed.push`, `workspace.set_auto_title`, `surface.resume.get/set/clear`은 서버가 해당 정확한 메서드를 capability로 광고한 경우에만 호출합니다. capability 응답이 없거나 잘못되면 V1 관찰은 계속 가능하지만 선택 V2 메서드는 호출하지 않습니다.
+
+`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)의 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 cmux hook이 우선합니다. 환경 변수 값이 `~` 또는 `~/`로 시작하면 현재 사용자의 home directory로 확장하며 `~other` 형태는 추측해 확장하지 않습니다. 이때 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention은 이 패키지가 보내지 않습니다. `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`의 기본값은 `true`이지만 이 precedence를 넘지 않습니다.
+
+native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|idle`을 해당 `--panel=<CMUX_SURFACE_ID>`에 보냅니다. `idle`은 cmux에 유휴 상태를 알리는 신호이며, 이 확장이 hibernate/resume을 수행하거나 실행 lifecycle authority를 갖는 것은 아닙니다.
+
+## opt-in 데이터와 resume 보호
+
+`feed`는 session ID, event 이름, tool call ID 및 tool name만 보낼 수 있습니다. `meta block`은 아홉 개의 숫자 집계만 보냅니다. `auto title`은 Pi가 제공한 session name을 보낼 수 있고, `resume fallback`은 session ID와 `pi --session '<sessionId>'`를 binding에 보냅니다. 따라서 모두 기본 비활성입니다.
+
+feed의 session/tool call ID와 resume fallback의 checkpoint ID는 cmux protocol의 `[A-Za-z0-9_.:-]{1,128}` token이어야 합니다. process-local session safe text에는 해당하지만 이 token 형식이 아닌 ID에서는 해당 feed 요청과 resume fallback을 생략합니다.
+
+resume fallback은 `surface.resume.get`으로 기존 binding을 먼저 읽습니다. binding이 비어 있거나 동일 checkpoint인 경우에만 설정하며, 다른 checkpoint 또는 해석할 수 없는 binding은 덮어쓰지 않습니다. 설정 뒤에도 같은 binding의 소유를 확인해야 하며, shutdown에서 자신이 확인한 동일 binding만 `surface.resume.clear`로 제거합니다.
+
+## label과 session 경계
+
+V1 상태·progress·log와 V2 notification body의 text 한도는 512 UTF-8 bytes이고 V2 notification title과 workspace auto-title은 128 UTF-8 bytes입니다. label은 control/bidi 문자를 공백으로 정규화하고 whitespace를 접은 뒤, `PI_CMUX_PRESENCE_MAX_LABEL_CHARS`와 목적지 byte 한도를 모두 만족하도록 완전한 Unicode code point 단위로 축약합니다. 축약 표시 `…`의 byte와 code point도 한도에 포함합니다.
+
+host session ID는 process-local 이벤트와 동일하게 control/bidi 문자가 없는 1–96 Unicode code points의 safe text여야 합니다. 누락·조회 오류·범위 위반이면 새 cmux client나 ready/update를 만들지 않고 해당 presence 세션을 비활성화하며, 이전 세션에서 소유한 status/progress/lifecycle/resume 출력은 직렬 teardown으로 정리합니다.
+
+## identity와 소켓
+
+`CMUX_WORKSPACE_ID`와 `CMUX_SURFACE_ID`가 모두 RFC variant UUID v1–v5여야 합니다. 하나라도 없거나 잘못되면 포커스나 다른 workspace/surface를 추측하지 않고 비활성입니다.
+
+`CMUX_SOCKET_PATH`가 있으면 그 **절대 경로만** 검사합니다. 없으면 `~/.local/state/cmux/cmux.sock`만 검사하며 `/tmp/cmux.sock` 같은 대체 경로는 찾지 않습니다. 소켓은 현재 UID 소유 Unix socket이고 group/other 권한이 없어야 합니다.
+
+소켓의 lexical path와 resolved parent부터 filesystem root까지 모든 ancestor를 검사합니다. 각 디렉터리는 root 또는 현재 UID 소유이고 group/other writable이면 안 됩니다. lexical symlink ancestor는 root 소유인 경우만 허용하며, root 소유 sticky `/tmp`·`/private/tmp`만 공유 ancestor 예외로 허용합니다. 소켓 owner-only 조건은 그대로 적용됩니다. 연결 직전과 직후 device/inode/UID·전체 ancestor 안전성을 재검사해 교체 경로를 거부합니다.
+
+## 실패 방식과 문제 해결
+
+identity와 소켓 선택은 fail-closed입니다. 검증에 실패하면 cmux 쓰기를 만들지 않습니다. 연결·시간 초과·큐 포화·응답 검증 실패는 best-effort 관찰 쓰기만 유실시키며 Pi 작업을 실패시키지 않습니다. 직렬 queue에서 아직 실행되지 않은 같은 key의 UI 쓰기는 latest-write-wins로 병합되어 같은 promise를 공유합니다. 실행 중인 요청과 서로 다른 key는 교체하지 않습니다.
+
+다음은 로컬에서 확인하는 읽기 전용 순서입니다. 환경 변수·경로·ID의 출력은 공유하지 마세요. 이 패키지는 비밀값을 출력하거나 제출할 것을 요구하지 않습니다.
+
+1. **대상과 활성화 여부** — 다음 명령으로 필요한 값이 설정되어 있는지만 로컬에서 확인합니다.
+
+   ```bash
+   printenv CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH PI_CMUX_PRESENCE_ENABLED
+   ```
+
+   `CMUX_WORKSPACE_ID`와 `CMUX_SURFACE_ID`는 각각 RFC variant UUID v1–v5여야 합니다. `CMUX_SOCKET_PATH`를 설정했다면 절대 경로여야 하며, 비어 있으면 기본 후보는 `$HOME/.local/state/cmux/cmux.sock` 하나입니다. invalid boolean/integer 값은 오류가 아니라 기본값으로 돌아갑니다.
+
+2. **소켓과 부모 디렉터리** — 현재 후보가 Unix socket인지와 직접 부모의 소유자·mode를 읽기 전용으로 확인합니다. `test -S`가 성공해야 합니다.
+
+   ```bash
+   configured_socket=$(printf '%s' "${CMUX_SOCKET_PATH-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+   socket_path="${configured_socket:-$HOME/.local/state/cmux/cmux.sock}"
+   test -S "$socket_path" && printf '%s\n' 'Unix socket found'
+   ls -ld "$(dirname "$socket_path")" "$socket_path"
+   ```
+
+   socket은 현재 UID 소유이고 group/other 권한이 없어야 합니다. 직접 부모 확인만으로 충분하지 않습니다. 확장은 lexical path와 resolved parent부터 root까지의 모든 ancestor도 검사하며, root 소유 sticky `/tmp` 또는 `/private/tmp`만 공유 ancestor 예외로 허용합니다.
+
+3. **공식 hook 우선순위** — hook 경로와 marker, disable flag를 확인합니다. `PI_CODING_AGENT_DIR`의 `~`/`~/`만 현재 home으로 확장됩니다.
+
+   ```bash
+   configured_hook_dir=$(printf '%s' "${PI_CODING_AGENT_DIR-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+   hook_dir="${configured_hook_dir:-$HOME/.pi/agent}"
+   case "$hook_dir" in
+     '~') hook_dir=$HOME ;;
+     '~/'*) hook_dir="$HOME/${hook_dir#\~/}" ;;
+   esac
+   hook_path="$hook_dir/extensions/cmux-session.ts"
+   grep -F 'cmux-pi-session-extension-marker v2' "$hook_path"
+   printenv CMUX_PI_HOOKS_DISABLED
+   ```
+
+   marker가 있고 `CMUX_PI_HOOKS_DISABLED`가 정확히 `1`이 아니면 공식 hook이 우선합니다. 이 경우 이 패키지는 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention을 보내지 않습니다.
+
+4. **capability와 기능 flag** — 초기 V2 `system.capabilities` 응답에 필요한 정확한 메서드가 광고되는지 cmux 측 진단으로 확인합니다. 광고가 없거나 응답이 형식에 맞지 않으면 V1 관찰은 가능해도 V2 notification/flash/feed/auto-title/resume은 호출하지 않습니다. 이어서 해당 기능의 `PI_CMUX_PRESENCE_NOTIFICATIONS`, `PI_CMUX_PRESENCE_FLASH`, `PI_CMUX_PRESENCE_FEED`, `PI_CMUX_PRESENCE_AUTO_TITLE`, `PI_CMUX_PRESENCE_RESUME_FALLBACK` 및 V1 출력 flag인 `PI_CMUX_PRESENCE_SIDEBAR`, `PI_CMUX_PRESENCE_PROGRESS`, `PI_CMUX_PRESENCE_LOG`, `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`, `PI_CMUX_PRESENCE_META_BLOCK`를 로컬 설정에서 확인합니다.
+
+5. **시간과 정리** — `PI_CMUX_PRESENCE_TIMEOUT_MS`, `PI_CMUX_PRESENCE_MAX_QUEUE`, `PI_CMUX_PRESENCE_FINAL_CLEAR_MS`가 의도한 값인지 확인합니다. progress flag가 `false`이면 초기화·종료 clear를 포함해 progress를 변경하지 않습니다.
+
+Pi peer dependency의 최소 선언은 `@earendil-works/pi-coding-agent >=0.80.10`입니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.
