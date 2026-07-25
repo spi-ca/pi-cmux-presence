@@ -9,11 +9,11 @@ Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
 ```bash
-# 전역 설치
-pi install git:github.com/spi-ca/pi-cmux-presence
+# v0.1.0 전역 설치
+pi install git:github.com/spi-ca/pi-cmux-presence@v0.1.0
 
-# 설치된 Git package 갱신
-pi update --extension git:github.com/spi-ca/pi-cmux-presence
+# 이후 새 release ref로 갱신하는 예시
+pi install git:github.com/spi-ca/pi-cmux-presence@v0.2.0
 
 # 제거
 pi remove git:github.com/spi-ca/pi-cmux-presence
@@ -22,7 +22,7 @@ pi remove git:github.com/spi-ca/pi-cmux-presence
 프로젝트에만 설치하려면 프로젝트 루트에서 설치 명령에 `-l`을 붙입니다.
 
 ```bash
-pi install -l git:github.com/spi-ca/pi-cmux-presence
+pi install -l git:github.com/spi-ca/pi-cmux-presence@v0.1.0
 ```
 
 ### 로컬 경로 설치·개발

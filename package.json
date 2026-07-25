@@ -13,7 +13,8 @@
   "scripts": {
     "test": "bun test --pass-with-no-tests",
     "check": "bunx tsc --noEmit",
-    "ci": "bun run check && bun run test"
+    "ci": "bun run check && bun run test",
+    "diagram:render": "bunx --package @mermaid-js/mermaid-cli mmdc -i docs/diagram/architecture.mmd -o docs/diagram/architecture.svg -b white && bunx --package @mermaid-js/mermaid-cli mmdc -i docs/diagram/architecture.mmd -o docs/diagram/architecture.png -b white -s 2 && bunx --package @mermaid-js/mermaid-cli mmdc -i docs/diagram/event-flow.mmd -o docs/diagram/event-flow.svg -b white && bunx --package @mermaid-js/mermaid-cli mmdc -i docs/diagram/event-flow.mmd -o docs/diagram/event-flow.png -b white -s 2"
   },
   "license": "MIT",
   "devDependencies": {
