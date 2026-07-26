@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. `tsconfig.json`의 Pi 타입 경로는 Pi 설치 레이아웃 상대 경로 `../../npm/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts`입니다. 패키지를 다른 위치로 옮기면 먼저 이 경로를 확인해야 합니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi `0.82.x` 타입은 devDependency인 `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 이는 `package.json`과 `bun.lock`의 선언에 따릅니다.
 
 ```bash
 bun install
@@ -14,27 +14,54 @@ bun pm pack --dry-run
 
 `ci`는 타입 검사와 테스트를 순서대로 실행합니다. `pack --dry-run`은 배포하지 않고 패키지 포함 파일을 확인합니다.
 
-## 구조
+## 프로젝트 구조
 
 ![Pi lifecycle에서 Unix 소켓 cmux 출력까지의 presence 아키텍처](diagram/architecture.svg)
 
-이 이미지는 구조 개요이며, 세부 동작은 아래 문서를 대체하지 않습니다. Mermaid 원본: [`diagram/architecture.mmd`](diagram/architecture.mmd)
+이 이미지는 구조 개요이며, 아래의 세부 파일 구성을 대체하지 않습니다. Mermaid 원본: [`diagram/architecture.mmd`](diagram/architecture.mmd)
 
-- `index.ts`: 안정적인 Pi 확장 진입점
-- `src/presence.ts`: 설정을 해석하고 runtime과 hook adapter를 조합하는 얇은 composition root
-- `src/hooks.ts`: Pi lifecycle과 process-local event observer 등록
-- `src/runtime.ts`: 세션 상태 머신, 직렬 teardown, replay, client lifecycle과 opt-in 조정
-- `src/presentation.ts`: status/progress 선택, style, label·meta·terminal 상태의 순수 렌더링 정책
-- `src/text.ts`: control/bidi 정규화와 code-point-safe UTF-8 byte 축약
-- `src/official-hook.ts`: home-relative agent directory와 공식 cmux hook 감지
-- `src/config.ts`: public 환경 변수, 기본값, 범위
-- `src/identity.ts`: workspace/surface UUID와 안전한 소켓 경로
-- `src/transport.ts`: 소켓 재검증, 단일 직렬 queue, keyed latest-write-wins 병합, 제한된 응답 교환
-- `src/protocol.ts`: 목적지별 byte 한도와 cmux V1/V2 request·response 검증·인코딩
-- `src/client.ts`: capability-gated V2와 설정-gated V1 cmux 쓰기, resume ownership 확인
-- `src/usage.ts`: assistant 토큰·비용·context 사용률 집계
-- `src/events.ts`: update/ready contract, session/source fence와 retained state
-- `src/todo.ts`: provenance와 전체 task ID 고유성을 확인한 RPIV todo count/progress adapter
+```text
+index.ts                  — 안정적인 Pi 확장 진입점, package.json의 pi.extensions가 참조
+src/client.ts             — capability-gated V2와 설정-gated V1 cmux 쓰기, resume ownership 확인
+src/config.ts             — public 환경 변수, 기본값, 범위
+src/events.ts             — update/ready contract, session/source fence와 retained state
+src/hooks.ts              — Pi lifecycle과 process-local event observer 등록
+src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로
+src/official-hook.ts      — home-relative agent directory와 공식 cmux hook 감지
+src/presence.ts           — 설정을 해석하고 runtime과 hook adapter를 조합하는 얇은 composition root
+src/presentation.ts       — status/progress 선택, style, label·meta·terminal 상태의 순수 렌더링 정책
+src/protocol.ts           — 목적지별 byte 한도와 cmux V1/V2 request·response 검증·인코딩
+src/runtime.ts            — 세션 상태 머신, 직렬 teardown, replay, client lifecycle과 opt-in 조정
+src/text.ts               — control/bidi 정규화와 code-point-safe UTF-8 byte 축약
+src/todo.ts               — provenance와 전체 task ID 고유성을 확인한 RPIV todo count/progress adapter
+src/transport.ts          — 소켓 재검증, 단일 직렬 queue, keyed latest-write-wins 병합, 제한된 응답 교환
+src/usage.ts              — assistant message별 usage delta의 토큰·비용 누적과 context 사용률 집계
+src/validation.ts         — untrusted input의 plain-object·control/bidi·protocol token 공통 검증
+test/client.test.ts       — PresenceClient의 capability-gated V2/V1 쓰기와 resume ownership 테스트
+test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트
+test/entrypoint.test.ts   — 공개 확장 진입점의 lifecycle/event 등록 계약 테스트
+test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
+test/socket-only.test.ts  — production 소스에 process 실행 API가 없음을 확인하는 정적 가드 테스트
+test/state.test.ts        — event registry 파싱, source fence, todo adapter, identity, usage 상태 테스트
+test/text.test.ts         — presentation 렌더링과 text 정규화·축약 테스트
+test/transport.test.ts    — UnixSocketTransport 연결 lifecycle과 BoundedSocketQueue 테스트
+test/helpers/             — 테스트 전용 in-memory fake Unix 소켓 서버(`fake-socket.ts`)
+docs/                     — 주제별 문서
+docs/diagram/             — Mermaid 원본, 흰색 배경 SVG·2x PNG 렌더 결과, 공유 mermaid-config.json·puppeteer-config.json
+docs/guidelines/          — 벤더된 문서·에이전트 지침 작성 가이드(`a-complete-guide-to-agents-md.md`, `karpathy-guidelines.md`)
+```
+
+루트 `index.ts`는 그대로 둡니다. `package.json`의 `pi.extensions`가 이 파일을 확장 진입점으로 참조하기 때문입니다. `src/`는 하위 디렉터리 없이 평면 구조이며, composition root인 `src/presence.ts`를 제외한 각 모듈이 설정·identity·transport·protocol·client·hooks·runtime·presentation·text·usage·events·todo·validation·official-hook 중 하나의 단일 책임만 갖습니다. `test/`는 대체로 같은 이름의 `src` 모듈을 다루지만, `socket-only.test.ts`처럼 여러 모듈에 걸친 정적 불변 조건을 확인하는 테스트도 있고 `test/helpers/`는 공유 fake 소켓 fixture만 둡니다.
+
+## 다이어그램 렌더링
+
+Mermaid 원본과 렌더링 결과(흰색 배경 SVG, 흰색 배경 2x PNG)는 `docs/diagram/`에 함께 둡니다. 같은 디렉터리의 공유 `mermaid-config.json`과 `puppeteer-config.json`이 테마와 sandbox 플래그를 결정합니다.
+
+```bash
+bun run diagram:render
+```
+
+정확한 입력·출력 파일 목록과 옵션은 `package.json`의 script와 [`docs/diagram/README.md`](diagram/README.md)를 기준으로 합니다.
 
 ## 변경 불변 조건
 
@@ -47,6 +74,7 @@ bun pm pack --dry-run
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 state를 추가하면 style·priority와 event validator를 함께 갱신합니다.
 - `pi`와 `pi-todo`는 예약 source입니다. generic update/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
+- `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
 - 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
 - feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
 
@@ -58,6 +86,17 @@ bun pm pack --dry-run
 
 ## 관련 문서
 
-- [설정과 소켓 조건](configuration.md): socket/identity, capability, 공식 hook, privacy opt-in
-- [이벤트 계약](event-contract.md): generic producer, ready replay, todo progress
-- [`pi-subagent` generic producer 연동](pi-subagent-integration.md): dependency 없는 producer와 lifecycle authority 경계
+- [`configuration.md`](configuration.md) — 환경 변수, capability negotiation, socket/identity 조건과 opt-in 개인정보 범위
+- [`event-contract.md`](event-contract.md) — `pi-presence:update:v1` generic producer 계약, ready replay, todo progress 규칙
+- [`feature-ownership.md`](feature-ownership.md) — `pi-cmux-presence`/`pi-subagent`/공식 cmux hook의 기능 경계와 `pi-cmux` 비교표
+- [`pi-subagent-integration.md`](pi-subagent-integration.md) — `pi-subagent` generic producer 연동 계약과 lifecycle authority 경계
+
+## 문서 작성 방식
+
+`docs/guidelines/`의 progressive disclosure 접근을 따릅니다.
+
+- `README.md`는 짧고 신호가 높은 진입 문서로 유지합니다.
+- 자세한 동작은 위 주제별 문서에 둡니다.
+- 전체 구현 목록보다 안정적인 개념을 우선합니다.
+- 예외를 추가하기보다 모순을 제거합니다.
+- 중복된 명령 목록은 최소화하고 `package.json`과 맞춥니다.

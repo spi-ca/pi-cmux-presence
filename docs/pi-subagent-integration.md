@@ -4,7 +4,7 @@
 
 이 문서는 `pi-cmux-presence`가 소비하는 **generic producer 계약**과 `pi-subagent`에 적용할 수 있는 예시를 설명합니다. 이 저장소는 `pi-subagent`를 import하거나 dependency로 선언하지 않으며, 외부 패키지의 현재 구현·production entrypoint·동작 parity를 검증하거나 단정하지 않습니다. 두 패키지를 함께 쓸 때의 기대 계약은 [이벤트 계약](event-contract.md)뿐입니다.
 
-이 계약을 채택하는 producer는 Pi의 같은 프로세스 event bus에서 현재 `sessionId`, 자신이 소유한 `generation`·단조 증가 `sequence`, 비예약 `source.id`, state/count를 넣어 발행합니다. 선택 `progress`, `usage`, `attention`은 실제로 제공할 수 있는 경우에만 포함합니다. consumer는 source별 fence와 64-source 상한을 적용하며 `pi`·`pi-todo` 예약 source는 외부 입력으로 수락하지 않습니다.
+이 계약을 채택하는 producer는 Pi의 같은 프로세스 event bus에서 현재 `sessionId`, 자신이 소유한 `generation`·단조 증가 `sequence`, 비예약 `source.id`, state/count를 넣어 발행합니다. 선택 `progress`, `usage`, `attention`은 실제로 제공할 수 있는 경우에만 포함합니다. consumer는 source별 fence와 [이벤트 계약](event-contract.md)에 정의된 source 상한을 적용하며 `pi`·`pi-todo` 예약 source는 외부 입력으로 수락하지 않습니다.
 
 ```ts
 pi.events.emit("pi-presence:update:v1", {

@@ -2,9 +2,11 @@
 
 Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상태를 cmux에 **Unix 소켓으로만** 전달하는 로컬 Pi 패키지입니다. 프로세스나 cmux CLI를 실행하지 않으며 Pi TUI, LLM 도구, 프롬프트, 스키마를 추가하지 않습니다.
 
+저장소: <https://github.com/spi-ca/pi-cmux-presence>
+
 ## 설치
 
-공개 Git 패키지는 Pi `>=0.80.10`에서 설치합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
+공개 Git 패키지는 Pi `>=0.82.0`에서 설치합니다(`package.json`의 `peerDependencies` 기준). `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
 
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
@@ -12,8 +14,8 @@ Pi extension을 포함한 제3자 패키지는 **full system access**로 실행�
 # v0.1.0 전역 설치
 pi install git:github.com/spi-ca/pi-cmux-presence@v0.1.0
 
-# 이후 새 release ref로 갱신하는 예시
-pi install git:github.com/spi-ca/pi-cmux-presence@v0.2.0
+# 갱신: `v0.1.0` 부분을 존재하는 release tag로 바꾸어 실행
+pi install git:github.com/spi-ca/pi-cmux-presence@v0.1.0
 
 # 제거
 pi remove git:github.com/spi-ca/pi-cmux-presence
@@ -52,7 +54,7 @@ pi install -l /absolute/path/to/pi-cmux-presence
 
 ### 공식 cmux hook 우선순위
 
-`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)에 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 hook이 우선합니다. `PI_CODING_AGENT_DIR`의 선두 `~` 또는 `~/`는 현재 사용자의 home directory로 확장합니다. 이때 이 패키지는 내장 Pi의 PID/lifecycle, feed, meta block, auto-title, resume fallback 및 Pi 완료 attention을 보내지 않습니다. 상태·progress와 다른 생산자의 attention은 계속 처리합니다. marker가 없거나 `CMUX_PI_HOOKS_DISABLED=1`이면 아래 설정대로 이 패키지의 경로를 사용합니다.
+공식 cmux hook(`cmux-session.ts`의 `cmux-pi-session-extension-marker v2`)이 감지되고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 그 hook이 우선하며, 이 패키지는 native lifecycle·feed·meta block·auto-title·resume fallback·완료 attention을 보내지 않고 상태·progress와 다른 생산자의 attention만 계속 처리합니다. 감지 경로, `PI_CODING_AGENT_DIR` 확장 규칙, marker 부재 시 동작은 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
 
 ## cmux 프로토콜
 
@@ -67,7 +69,7 @@ pi install -l /absolute/path/to/pi-cmux-presence
 | V2 attention | `notification.create_for_surface`, `surface.trigger_flash` | 해당 기능 flag와 서버 capability |
 | V2 opt-in | `feed.push`, `workspace.set_auto_title`, `surface.resume.get/set/clear` | 해당 flag, 공식 hook 부재, 서버 capability |
 
-V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_status`에는 `--panel=<CMUX_SURFACE_ID>`도 포함됩니다. V2의 surface 메서드는 workspace/surface UUID를 모두 포함합니다.
+V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_status`와 V1 native lifecycle 명령(`set_agent_pid`, `set_agent_lifecycle`, `clear_agent_pid`)에는 `--panel=<CMUX_SURFACE_ID>`도 포함됩니다. V2의 surface 메서드는 workspace/surface UUID를 모두 포함합니다.
 
 ## 프로세스-로컬 이벤트
 
@@ -94,20 +96,22 @@ pi.events.emit("pi-presence:ready:v1", {
 
 같은 프로세스의 외부 producer가 제공하는 `source.label`과 `progress.label`은 형식·control/bidi·길이를 검증하고 목적지 byte 한도로 축약하지만, 내용의 민감도를 판별하거나 redaction하지는 않습니다. 수락된 label은 status, progress, log, notification으로 cmux에 표시될 수 있으므로 외부 producer가 비밀, credential, 경로, prompt나 신뢰할 수 없는 원문을 넣지 않아야 합니다.
 
-비기본 기능은 다음 데이터를 추가로 cmux에 보낼 수 있으므로 명시적으로 opt-in해야 합니다.
-
-- `PI_CMUX_PRESENCE_FEED=true`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`의 session ID와, tool 이벤트일 때 tool call ID·tool name만 전송합니다. cmux feed의 session/tool call ID는 `[A-Za-z0-9_.:-]{1,128}` token이어야 하며, 더 넓은 process-local safe text에는 해당하지만 이 token 형식이 아닌 ID의 feed 요청은 생략됩니다. 프롬프트와 tool 인수·결과는 넣지 않습니다.
-- `PI_CMUX_PRESENCE_META_BLOCK=true`: source/작업 텍스트 없이 active/completed/failed/queued/cancelled/total, 반올림 token, 두 자리 cost, 반올림 context percent의 아홉 숫자만 newline으로 전송합니다.
-- `PI_CMUX_PRESENCE_AUTO_TITLE=true`: Pi가 제공한 session name을 최대 길이로 축약한 `Pi · <name>` workspace title을 전송합니다.
-- `PI_CMUX_PRESENCE_RESUME_FALLBACK=true`: `[A-Za-z0-9_.:-]{1,128}` token인 session ID를 checkpoint ID로, `pi --session '<sessionId>'` 명령을 resume binding으로 전송합니다. token 형식이 아닌 session ID에는 resume fallback을 설치하지 않습니다. 기존 binding은 비어 있거나 같은 checkpoint일 때만 설정하고, 설정 뒤 소유권을 확인한 경우에만 종료 시 지웁니다.
+비기본 기능(`PI_CMUX_PRESENCE_FEED`, `PI_CMUX_PRESENCE_META_BLOCK`, `PI_CMUX_PRESENCE_AUTO_TITLE`, `PI_CMUX_PRESENCE_RESUME_FALLBACK`)은 명시적으로 opt-in해야 추가 데이터(feed의 session/tool 식별자와 cmux가 이미 제공한 `_source`·workspace/surface ID, meta block의 숫자 집계, auto-title의 session name, resume fallback의 checkpoint ID)를 cmux에 보냅니다. 어느 것도 프롬프트나 tool 인수·결과는 넣지 않습니다. 각 기능이 정확히 보내는 필드와 token 형식 제약은 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
 
 ## 문서
 
-- [설정과 소켓 조건](docs/configuration.md)
-- [이벤트 계약](docs/event-contract.md)
-- [개발 안내](docs/development.md)
-- [`pi-subagent` generic producer 연동](docs/pi-subagent-integration.md)
-- [기능 소유권과 `pi-cmux` 대비 현황](docs/feature-ownership.md)
+README는 진입점만 담고, 세부 내용은 주제별 문서로 나눕니다.
+
+| 주제 | 문서 |
+| --- | --- |
+| 설정과 소켓 조건 | [`docs/configuration.md`](docs/configuration.md) |
+| 이벤트 계약 | [`docs/event-contract.md`](docs/event-contract.md) |
+| 개발 워크플로와 프로젝트 구조 | [`docs/development.md`](docs/development.md) |
+| `pi-subagent` generic producer 연동 | [`docs/pi-subagent-integration.md`](docs/pi-subagent-integration.md) |
+| 기능 경계와 `pi-cmux` 비교 | [`docs/feature-ownership.md`](docs/feature-ownership.md) |
+| Mermaid 다이어그램 원본과 렌더링 | [`docs/diagram/README.md`](docs/diagram/README.md) |
+| 변경 이력 | [`CHANGELOG.md`](CHANGELOG.md) |
+| 에이전트용 문서 작성 지침(벤더) | [`docs/guidelines/`](docs/guidelines/) |
 
 ## 검증
 
@@ -117,3 +121,7 @@ bun pm pack --dry-run
 ```
 
 자동 검증은 가짜 Unix 소켓과 단위/통합 경로를 사용합니다. 실행 중인 cmux 서버에 대한 live 검증은 이 저장소에서 주장하지 않습니다.
+
+## 라이선스
+
+MIT. 자세한 내용은 [`LICENSE`](LICENSE)를 참고하세요.

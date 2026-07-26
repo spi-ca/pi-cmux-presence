@@ -60,7 +60,7 @@ cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress�
 
 각 source status는 SHA-256 기반 키로 기록됩니다. `set_status`는 workspace `--tab`과 surface `--panel`을 지정하며, 스타일은 `idle` gray/circle/priority 10, `waiting` amber/clock/20, `running` blue/play/30, `success` green/check/20, `error` red/x/40, `cancelled` gray/minus/20입니다.
 
-`attention: "info" | "success" | "error"`는 log/notification/flash 요청입니다. 각각 `PI_CMUX_PRESENCE_LOG`, `PI_CMUX_PRESENCE_NOTIFICATIONS`, `PI_CMUX_PRESENCE_FLASH`와 필요한 V2 capability가 함께 충족될 때만 전송됩니다. `none` 또는 생략은 요청하지 않습니다.
+`attention: "info" | "success" | "error"`는 log/notification/flash 요청입니다. V1 `log`는 `PI_CMUX_PRESENCE_LOG`만 충족하면 전송되고, V2 notification·flash는 각각 `PI_CMUX_PRESENCE_NOTIFICATIONS`·`PI_CMUX_PRESENCE_FLASH`와 해당 V2 capability가 함께 충족될 때만 전송됩니다. `none` 또는 생략은 요청하지 않습니다.
 
 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS`는 내장 `pi` source의 `agent_settled` 뒤 최종 status를 지우기까지의 대기 시간만 제어합니다. 이 타이머는 외부 source의 retained 상태를 지우지 않으며, 외부 상태는 위의 session teardown까지 남을 수 있습니다.
 
