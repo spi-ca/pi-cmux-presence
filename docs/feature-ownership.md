@@ -10,26 +10,27 @@
 | --- | --- | --- | --- |
 | 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 surface status로 표시 | 관여하지 않음 | presence가 `agent_settled`에서 최종화 |
 | todo 진행률 | 검증한 `todo` 결과에서 count와 `completed/visible`만 계산 | 관여하지 않음 | task 텍스트는 전송하지 않음 |
-| subagent 상태 | generic update를 검증해 status/progress/attention으로 렌더링 | 원하면 `pi-presence:update:v1`으로 검증 가능한 summary를 발행 | package dependency 없음 |
+| subagent 상태 | generic update를 검증해 status/progress로 렌더링. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계 | 원하면 `pi-presence:update:v1`으로 검증 가능한 summary를 발행 | package dependency 없음; label/kind는 special routing 조건이 아님 |
+| root aggregate·child `inherit` | 관여하지 않음; 로드된 경우 수락한 event만 observer로 표시 | root aggregate 소유와 `inherit` child 정책은 producer가 결정 | consumer는 이를 의존·조정·두 package load-order로 검증하지 않음; extension이 없으면 이 consumer 동작도 없음 |
 | subagent 실행·취소·결과 | 관여하지 않음 | 실행 패키지가 authority를 유지 | scheduler, lease, reaper, cleanup 등의 실제 범위는 외부 구현의 계약 |
 | cmux 상태 스타일 | state별 고정 icon/color/priority, surface-scoped key | cmux 직접 mutation을 요구하지 않음 | V1 socket |
 | cmux progress | todo-first deterministic 단일 슬롯 중재; flag가 꺼지면 초기·종료 clear도 생략 | 실제로 보유한 determinate progress만 선택 발행 가능 | cmux workspace당 progress 슬롯 하나 |
-| 알림·flash·log | config로 게이팅; notification·flash는 V2 capability도 필요, log는 V1이라 capability 불필요 | 필요한 경우 generic attention을 발행 가능 | replay attention은 `none` 권장 |
+| 알림·flash·log | 정책·레거시 kill switch·capability로 게이팅; exact `pi-subagent` terminal은 의미적으로 한 번만 집계 | 필요한 경우 실제 background terminal summary만 발행 가능 | replay/cancel/handoff는 `attention: "none"`; 성공 flash는 기본 비활성 |
 | Pi PID/lifecycle | 공식 hook 부재 시 기본 활성 fallback | 관여하지 않음 | generic event가 PID/lifecycle command를 만들 수 없음 |
 | Feed | 공식 hook 부재 시 opt-in privacy-minimal fallback | Feed 직접 호출을 요구하지 않음 | prompt/input/output/path 제외 |
 | metadata block | opt-in 숫자 집계 | 숫자 summary를 event에 포함할 수 있음 | producer text 제외 |
 | workspace title | opt-in Pi session name | 관여하지 않음 | 공식 hook 우선 |
 | session resume | opt-in, 소유 확인한 exact binding fallback | subagent session resume authority를 이전하지 않음 | 공식 cmux Pi hook 우선 |
-| ready/replay | consumer capability를 광고하고 local/todo를 재발행 | matching ready에 retained summary를 새 sequence로 재발행할 수 있음 | 실행 authority가 아닌 load-order 보정 |
+| ready/replay | consumer capability를 광고하고 local/todo를 재발행 | matching ready에 retained summary를 새 sequence로 재발행할 수 있음 | 실행 authority가 아닌 protocol 수준의 load-order 보정이며 두 package load-order test는 아님 |
 
 ## 유연한 연동 원칙
 
 - 공통 채널은 `pi-presence:update:v1`과 `pi-presence:ready:v1`입니다.
 - wire DTO는 두 저장소에 의도적으로 중복 선언합니다. 런타임 package dependency나 shared lifecycle 모듈을 만들지 않습니다.
 - `ready.consumer`는 UI capability 힌트이며 인증·명령 채널이 아닙니다.
-- `pi-cmux-presence`는 source가 subagent인지 테스트 runner인지에 관계없이 generic update를 검증합니다. 다만 `pi`와 `pi-todo`는 local source로 예약합니다.
-- `pi-subagent` 같은 producer는 필요하면 `source.id: "pi-subagent"`처럼 안정된 비예약 ID를 사용할 수 있습니다. consumer의 수락·부재가 producer의 실행·결과·취소·cleanup authority를 바꾸어서는 안 됩니다.
-- event listener, 잘못된 host session ID와 cmux socket 실패는 lifecycle 결과를 바꾸지 않습니다.
+- `pi-cmux-presence`는 모든 source에 generic update 검증을 적용하고 `pi`·`pi-todo`는 local source로 예약합니다. 단, 정확한 `source.id: "pi-subagent"`의 **attention**만 누적 count·parent settlement 기반 special policy를 사용합니다. 다른 ID와 `source.label`/`source.kind`에는 적용하지 않습니다.
+- `pi-subagent` 같은 producer는 필요하면 안정된 `source.id: "pi-subagent"`를 사용할 수 있습니다. 이 ID가 있어도 consumer의 수락·부재가 producer의 root aggregate 소유, 실행·결과·취소·cleanup authority를 바꾸어서는 안 됩니다. managed child가 이 extension을 로드하지 않으면 그 child에 이 consumer의 표시·알림 동작은 요구되지 않습니다.
+- event listener, 잘못된 host session ID와 cmux socket 실패는 lifecycle 결과를 바꾸지 않습니다. presence는 focus를 읽거나 foreground/background handoff를 제어할 trusted read-only capability가 없습니다. local Pi와 `pi-subagent` cancellation은 status-only `attention: "none"`으로 남으며 permissive policy도 native notification/flash로 승격하지 않습니다.
 - generic producer label은 형식 검증과 byte-safe 축약만 거치므로 producer가 민감정보와 신뢰할 수 없는 원문을 제외합니다.
 
 ## `pi-cmux` 비교
@@ -44,9 +45,10 @@
 | `/cmv`, `/cmh`, `/cmo`, `/cmt` | 미지원 | `pi-cmux`를 별도 유지할 때만 사용 |
 | review/continue/worktree/zoxide workflow | 미지원 | presence에 추가하지 않음 |
 | tool/file별 상세 sidebar log | 부분 지원 | attention log만 제공; raw 도구 인수·출력은 privacy상 제외 |
-| 정확한 permission/input-needed 상태 | 부분 지원 | generic producer가 `waiting`/attention을 제공할 수 있으나 Pi 자체의 모든 대기 이유를 추론하지 않음 |
+| 정확한 permission/input-needed 상태 | 부분 지원 | generic producer가 `waiting`/attention을 제공할 수 있으나 Pi 자체의 모든 대기 이유를 추론하지 않음. `pi-subagent`의 `waiting`은 scheduler queued-only이며 handoff 표지가 아님 |
 | notification history 읽기·mark-read·jump | 미지원 | 생성만 담당; 사용자 notification center 소유권 유지 |
 | surface 이동 뒤 workspace 재탐색 | 미지원 | 현재 session 시작 시 받은 exact workspace/surface를 사용 |
+| focus 기반 attention suppress | 미지원 | 신뢰할 수 있는 read-only focus capability가 없어 foreground/background를 판별하지 않음 |
 
 `pi-cmux`의 command/workflow가 필요하면 해당 package를 선택적으로 함께 둘 수 있습니다. 이 경우 status/sidebar/notification 기능은 한쪽만 활성화해 중복을 피합니다.
 

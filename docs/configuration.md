@@ -10,8 +10,10 @@
 | `PI_CMUX_PRESENCE_TIMEOUT_MS` | `1000` | 정수 100–30000, 개별 연결·응답 제한 |
 | `PI_CMUX_PRESENCE_MAX_QUEUE` | `16` | 정수 1–128, 대기 요청 상한 |
 | `PI_CMUX_PRESENCE_PROGRESS` | `true` | boolean, V1 progress set/clear 소유. `false`이면 초기화·종료 clear를 포함해 progress를 전혀 변경하지 않음 |
-| `PI_CMUX_PRESENCE_NOTIFICATIONS` | `true` | boolean, capability가 있을 때 V2 notification |
-| `PI_CMUX_PRESENCE_FLASH` | `true` | boolean, capability가 있을 때 V2 flash |
+| `PI_CMUX_PRESENCE_NOTIFICATIONS` | `true` | boolean, notification의 레거시 전역 kill switch. `false`이면 policy와 관계없이 V2 notification을 보내지 않음 |
+| `PI_CMUX_PRESENCE_FLASH` | `true` | boolean, flash의 레거시 전역 kill switch. `false`이면 policy와 관계없이 V2 flash를 보내지 않음 |
+| `PI_CMUX_PRESENCE_NOTIFY_POLICY` | `background` | enum: `errors`/`background`/`all`/`disabled`, V2 notification 대상 정책 |
+| `PI_CMUX_PRESENCE_FLASH_POLICY` | `errors` | enum: `errors`/`attention`/`disabled`, V2 flash 대상 정책 |
 | `PI_CMUX_PRESENCE_LOG` | `false` | boolean, V1 attention log |
 | `PI_CMUX_PRESENCE_SIDEBAR` | `true` | boolean, V1 status 쓰기 |
 | `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE` | `true` | boolean, Pi PID와 `running`/`idle` native lifecycle |
@@ -22,7 +24,39 @@
 | `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` | `1500` | 정수 0–60000, 내장 Pi 최종 status 제거 대기 |
 | `PI_CMUX_PRESENCE_MAX_LABEL_CHARS` | `96` | 정수 16–256, 전송 label의 Unicode code-point 축약 상한. 목적지별 UTF-8 byte 상한도 별도 적용 |
 
-boolean은 trim 및 대소문자 무시 후 `1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`만 인식합니다. 정수는 trim 뒤 ASCII 숫자만 받고 안전한 정수와 표의 포함 범위를 만족해야 합니다. 부호·소수·지수 표기와 범위 밖 값은 기본값입니다.
+boolean은 trim 및 대소문자 무시 후 `1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`만 인식합니다. 정수는 trim 뒤 ASCII 숫자만 받고 안전한 정수와 표의 포함 범위를 만족해야 합니다. 부호·소수·지수 표기와 범위 밖 값은 기본값입니다. enum도 trim·대소문자 무시 후 표의 정확한 값만 수락하며, 비어 있거나 잘못된 값은 각 기본값(`background`, `errors`)으로 돌아갑니다.
+
+### attention 정책과 레거시 flag
+
+`PI_CMUX_PRESENCE_NOTIFICATIONS=false`과 `PI_CMUX_PRESENCE_FLASH=false`는 각각 강제 disable인 레거시 kill switch입니다. 따라서 enum이 `all` 또는 `attention`이어도 해당 출력은 생기지 않습니다. 레거시 값이 `true`이거나 기본값일 때는 enum이 정책을 결정합니다. 즉 레거시 `true`가 명시한 enum을 덮어쓰지 않습니다.
+
+notification 정책은 다음과 같습니다.
+
+- `errors`: `attention: "error"`만 알립니다.
+- `background`(기본): 일반 외부 producer의 non-`none` attention과 error를 알리되, 내장 Pi의 단독 성공은 알리지 않습니다. 부모 성공과 `pi-subagent` 성공 집계가 실제 settlement에서 합쳐진 경우만 내장 성공으로 알릴 수 있습니다.
+- `all`: 모든 non-`none` attention을 알립니다.
+- `disabled`: notification을 만들지 않습니다.
+
+여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지에는 신뢰할 수 있는 read-only focus capability가 없으므로 focus 기반 suppress는 지원하지 않습니다.
+
+flash 정책은 다음과 같습니다.
+
+- `errors`(기본): error만 flash합니다. notification 정책이 `disabled`여도 error flash는 독립적으로 가능하며, 성공은 기본 flash하지 않습니다.
+- `attention`: 위 notification 정책의 attention 대상과 같은 경우 flash합니다.
+- `disabled`: flash하지 않습니다.
+
+notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 정확한 `pi-subagent`의 terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. 활성 부모 error는 최초 error부터 10초 후 한 번 dispatch하며 그 부모 run의 뒤늦은 settlement만 fence합니다. 비활성 success grace가 닫히기 전에 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. 취소와 ready replay(`attention: "none"`)는 attention을 만들지 않습니다.
+
+### 검토한 외부 cmux child profile
+
+이 패키지가 해석하는 외부 호환 profile 식별자는 정확히 `PI_CMUX_PROFILE=subagent-child-v1` 하나입니다. 이 exact profile이 있어야만 다음 channel별 suppression을 적용합니다.
+
+- `PI_CMUX_NOTIFY_LEVEL=disabled`도 정확히 일치하면 native notification만 억제합니다.
+- `PI_CMUX_SIDEBAR_FLASH=disabled`도 정확히 일치하면 native flash만 억제합니다.
+- profile은 정확하지만 한 channel 값만 정확히 일치하면 그 channel만 억제합니다. 다른 channel은 일반 `PI_CMUX_PRESENCE_*` policy·kill switch·capability 규칙을 그대로 따릅니다.
+- profile 누락, 공백을 포함한 profile, 대소문자가 다른 `disabled`, 또는 일부/잘못된 값은 다른 `PI_CMUX_*` 설정을 추론하거나 암묵적으로 억제하지 않습니다. 특히 `PI_CMUX_SIDEBAR_SOURCE`는 profile identity나 suppression 조건으로 읽지 않습니다.
+
+이 인식은 V2 native notification/flash에만 적용합니다. V1 sidebar status, progress, log와 나머지 presence 설정은 유지됩니다. 외부 producer의 환경과 공존하기 위한 compatibility boundary일 뿐, `pi-subagent` package dependency, 설치·로드 요구, root aggregate 소유, child 실행·취소·정리 lifecycle authority를 뜻하지 않습니다.
 
 ## capability negotiation과 native lifecycle
 
@@ -60,7 +94,7 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 
 소켓의 lexical path와 resolved parent부터 filesystem root까지 모든 ancestor를 검사합니다. 각 디렉터리는 root 또는 현재 UID 소유이고 group/other writable이면 안 됩니다. lexical symlink ancestor는 root 소유인 경우만 허용하며, root 소유 sticky `/tmp`·`/private/tmp`만 공유 ancestor 예외로 허용합니다. 소켓 owner-only 조건은 그대로 적용됩니다. 연결 직전과 직후 device/inode/UID·전체 ancestor 안전성을 재검사해 교체 경로를 거부합니다.
 
-`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)의 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 cmux hook이 우선합니다. 환경 변수 값이 `~` 또는 `~/`로 시작하면 현재 사용자의 home directory로 확장하며 `~other` 형태는 추측해 확장하지 않습니다. 이때 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention은 이 패키지가 보내지 않습니다. `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`의 기본값은 `true`이지만 이 precedence를 넘지 않습니다.
+`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)의 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 cmux hook이 우선합니다. 환경 변수 값이 `~` 또는 `~/`로 시작하면 현재 사용자의 home directory로 확장하며 `~other` 형태는 추측해 확장하지 않습니다. 감지는 비동기이지만 결과를 session epoch와 session ID로 fence하므로 지연된 이전 세션 probe가 현재 세션의 hook precedence를 바꾸지 않습니다. 이때 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention은 이 패키지가 보내지 않습니다. 일반 외부 producer는 계속 처리하지만, 정확히 `source.id: "pi-subagent"`의 버퍼된 success는 native notification/flash를 보내지 않으며(설정한 V1 log는 가능), 그 source의 집계 error는 정책·capability가 허용하면 한 번 보냅니다. `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`의 기본값은 `true`이지만 이 precedence를 넘지 않습니다.
 
 ## 실패 방식과 문제 해결
 
@@ -111,4 +145,4 @@ identity와 소켓 선택은 fail-closed입니다. 검증에 실패하면 cmux �
 
 5. **시간과 정리** — `PI_CMUX_PRESENCE_TIMEOUT_MS`, `PI_CMUX_PRESENCE_MAX_QUEUE`, `PI_CMUX_PRESENCE_FINAL_CLEAR_MS`가 의도한 값인지 확인합니다. progress flag가 `false`이면 초기화·종료 clear를 포함해 progress를 변경하지 않습니다.
 
-Pi peer dependency의 최소 선언은 `@earendil-works/pi-coding-agent >=0.82.0`입니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.
+`@earendil-works/pi-coding-agent` peer dependency는 optional `*`이므로 Pi 최소 버전을 선언·강제하지 않습니다. 개발 의존성은 `^0.82.0`이며 현재 `bun.lock`의 해석 버전은 `0.82.1`입니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.

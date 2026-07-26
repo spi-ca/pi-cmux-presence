@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi `0.82.x` 타입은 devDependency인 `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 이는 `package.json`과 `bun.lock`의 선언에 따릅니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 해당 개발 의존성 범위는 `^0.82.0`이고 현재 `bun.lock` 해석 버전은 `0.82.1`입니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install
@@ -27,6 +27,7 @@ src/config.ts             — public 환경 변수, 기본값, 범위
 src/events.ts             — update/ready contract, session/source fence와 retained state
 src/hooks.ts              — Pi lifecycle과 process-local event observer 등록
 src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로
+src/notification-policy.ts — exact `pi-subagent` 누적 terminal·attention/flash policy 판정
 src/official-hook.ts      — home-relative agent directory와 공식 cmux hook 감지
 src/presence.ts           — 설정을 해석하고 runtime과 hook adapter를 조합하는 얇은 composition root
 src/presentation.ts       — status/progress 선택, style, label·meta·terminal 상태의 순수 렌더링 정책
@@ -39,7 +40,9 @@ src/usage.ts              — assistant message별 usage delta의 토큰·비용
 src/validation.ts         — untrusted input의 plain-object·control/bidi·protocol token 공통 검증
 test/client.test.ts       — PresenceClient의 capability-gated V2/V1 쓰기와 resume ownership 테스트
 test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트
-test/entrypoint.test.ts   — 공개 확장 진입점의 lifecycle/event 등록 계약 테스트
+test/entrypoint.test.ts   — 공개 확장 진입점의 lifecycle/event 등록, exact child-profile suppression, terminal coalescing 테스트
+test/notification-policy.test.ts — exact `pi-subagent` cumulative terminal 판정, notification/flash policy, 고정 deadline 산술 테스트
+test/runtime-notification-acceptance.test.ts — manual clock과 fake Unix socket으로 활성 부모의 고정 window·후속 burst settlement 집계, 독립 error, 10초 fence, stale official-hook probe 및 callback fence를 결정적으로 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
 test/socket-only.test.ts  — production 소스에 process 실행 API가 없음을 확인하는 정적 가드 테스트
 test/state.test.ts        — event registry 파싱, source fence, todo adapter, identity, usage 상태 테스트
@@ -51,7 +54,7 @@ docs/diagram/             — Mermaid 원본, 흰색 배경 SVG·2x PNG 렌더 �
 docs/guidelines/          — 벤더된 문서·에이전트 지침 작성 가이드(`a-complete-guide-to-agents-md.md`, `karpathy-guidelines.md`)
 ```
 
-루트 `index.ts`는 그대로 둡니다. `package.json`의 `pi.extensions`가 이 파일을 확장 진입점으로 참조하기 때문입니다. `src/`는 하위 디렉터리 없이 평면 구조이며, composition root인 `src/presence.ts`를 제외한 각 모듈이 설정·identity·transport·protocol·client·hooks·runtime·presentation·text·usage·events·todo·validation·official-hook 중 하나의 단일 책임만 갖습니다. `test/`는 대체로 같은 이름의 `src` 모듈을 다루지만, `socket-only.test.ts`처럼 여러 모듈에 걸친 정적 불변 조건을 확인하는 테스트도 있고 `test/helpers/`는 공유 fake 소켓 fixture만 둡니다.
+루트 `index.ts`는 그대로 둡니다. `package.json`의 `pi.extensions`가 이 파일을 확장 진입점으로 참조하기 때문입니다. `src/`는 하위 디렉터리 없이 평면 구조이며, composition root인 `src/presence.ts`를 제외한 각 모듈이 설정·identity·transport·protocol·client·hooks·runtime·notification policy·presentation·text·usage·events·todo·validation·official-hook 중 하나의 단일 책임만 갖습니다. `test/`는 대체로 같은 이름의 `src` 모듈을 다루지만, `socket-only.test.ts`처럼 여러 모듈에 걸친 정적 불변 조건을 확인하는 테스트도 있고 `test/helpers/`는 공유 fake 소켓 fixture만 둡니다.
 
 ## 다이어그램 렌더링
 
@@ -72,17 +75,19 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 state를 추가하면 style·priority와 event validator를 함께 갱신합니다.
-- `pi`와 `pi-todo`는 예약 source입니다. generic update/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다.
+- `pi`와 `pi-todo`는 예약 source입니다. generic update/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다. `pi-subagent`는 예약은 아니지만 exact source ID의 attention에만 cumulative terminal policy가 적용되므로 label/kind 기반 special case를 추가하지 않습니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
-- 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
-- feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
+- 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
+- 검토한 child profile은 정확한 `PI_CMUX_PROFILE=subagent-child-v1`와 channel별 exact disable만 해석합니다. partial·malformed `PI_CMUX_*` 값이나 `PI_CMUX_SIDEBAR_SOURCE`로 다른 suppression을 추론하지 않고, sidebar/status·progress·log를 끄지 않습니다.
+- local Pi 및 exact `pi-subagent` cancellation은 status-only `attention: "none"`입니다. `all`/`attention` policy에서도 notification·flash·attention log로 승격하지 않습니다.
+- feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. generic presence update나 `pi-subagent` producer를 추가해도 이 기능이나 live cmux mutation/focus 제어를 암묵적으로 활성화하지 않습니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
 
 ## 검증 범위
 
-`bun run ci`는 설정 파싱, V1/V2 codec과 multibyte 경계, capability gate, event/ready contract, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합과 가짜 Unix 소켓의 대상·권한 검증을 실행합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
+`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값 포함), V1/V2 codec과 multibyte 경계, capability gate, event/ready contract, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
 
-이 검증은 실행 중인 cmux에 연결하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
+이 검증은 consumer 쪽 generic producer shape, 검토한 exact child-profile suppression, fake Unix socket과 정적 status-key namespace까지만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 연동은 검증하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
 
 ## 관련 문서
 

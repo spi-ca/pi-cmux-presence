@@ -6,7 +6,7 @@ Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상
 
 ## 설치
 
-공개 Git 패키지는 Pi `>=0.82.0`에서 설치합니다(`package.json`의 `peerDependencies` 기준). `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
+`package.json`의 Pi peer dependency는 optional `*`이므로 설치 가능한 Pi 최소 버전을 메타데이터로 강제하지 않습니다. 개발 의존성은 `^0.82.0`이고 현재 `bun.lock`은 `0.82.1`을 해석하지만, 실제 사용하는 Pi와의 호환성은 별도로 확인해야 합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
 
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
@@ -50,11 +50,14 @@ pi install -l /absolute/path/to/pi-cmux-presence
 - 최종 상태는 `agent_settled`에서 확정합니다. assistant 토큰, 양수 비용, 가능한 context 사용률과 `tool_result.isError`를 반영합니다. 내장 Pi 이벤트는 progress를 추정하지 않습니다.
 - host session ID가 이벤트 계약의 safe text 조건(1–96 Unicode code points)을 만족하지 않거나 조회 중 오류가 나면 해당 세션의 presence를 fail-closed로 비활성화하고 기존에 소유한 출력을 정리합니다. Pi lifecycle 오류로 전파하지 않습니다.
 - 상태·progress·notification·auto-title 문자열은 control/bidi 문자를 정규화하고 Unicode code point를 자르지 않으면서 설정의 글자 수와 목적지별 UTF-8 byte 한도를 모두 만족하도록 축약합니다.
-- 모든 관찰 쓰기는 best-effort입니다. 소켓 오류·시간 초과·큐 포화·응답 오류는 Pi 작업을 실패시키지 않으며 해당 출력만 유실될 수 있습니다. 같은 key로 대기 중인 UI 쓰기는 하나의 promise를 공유하며 최신 요청으로 교체되는 latest-write-wins 방식으로 병합되고, 이미 실행 중인 요청은 교체하지 않습니다.
+- 모든 관찰 쓰기는 best-effort입니다. 소켓 오류·시간 초과·큐 포화·응답 오류는 Pi 작업을 실패시키지 않으며 해당 출력만 유실될 수 있습니다. 같은 key로 대기 중인 UI 쓰기는 하나의 promise를 공유하며 최신 요청으로 교체되는 latest-write-wins 방식으로 병합되고, 이미 실행 중인 요청은 교체하지 않습니다. 이는 소켓 **전송** 병합이며, `pi-subagent`의 terminal 집계·시간 창 병합과는 별개입니다.
+- 외부 producer는 선택 사항입니다. 특히 `pi-subagent`는 이 패키지의 dependency나 import가 아니며, 같은 프로세스 event bus에 V1 summary를 발행할 때에만 선택적으로 연동됩니다. 정확히 `source.id: "pi-subagent"`인 입력에는 누적 terminal attention을 안전하게 한 번으로 묶는 소비자 측 정책이 적용됩니다. 상세 계약은 [`docs/pi-subagent-integration.md`](docs/pi-subagent-integration.md)를 참고하세요.
+- 검토한 외부 cmux child profile은 정확히 `PI_CMUX_PROFILE=subagent-child-v1`일 때만 인식합니다. 이 profile과 정확한 `PI_CMUX_NOTIFY_LEVEL=disabled` 또는 `PI_CMUX_SIDEBAR_FLASH=disabled` 조합은 각각 native notification 또는 native flash만 억제하고, sidebar status·progress·log는 유지합니다. 이는 환경 호환 경계일 뿐 dependency나 child lifecycle authority가 아닙니다. 세부 precedence는 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
+- local Pi와 정확한 `pi-subagent` producer의 cancellation은 status-only이며 `attention: "none"`입니다. `all`/`attention` 정책이어도 notification·flash를 만들지 않습니다.
 
 ### 공식 cmux hook 우선순위
 
-공식 cmux hook(`cmux-session.ts`의 `cmux-pi-session-extension-marker v2`)이 감지되고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 그 hook이 우선하며, 이 패키지는 native lifecycle·feed·meta block·auto-title·resume fallback·완료 attention을 보내지 않고 상태·progress와 다른 생산자의 attention만 계속 처리합니다. 감지 경로, `PI_CODING_AGENT_DIR` 확장 규칙, marker 부재 시 동작은 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
+공식 cmux hook(`cmux-session.ts`의 `cmux-pi-session-extension-marker v2`)이 감지되고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 그 hook이 우선합니다. 이 패키지는 native lifecycle·feed·meta block·auto-title·resume fallback·내장 Pi completion attention을 보내지 않습니다. 일반 외부 producer의 status/progress/attention은 계속 처리하지만, 정확히 `source.id: "pi-subagent"`의 버퍼된 성공 attention은 native notification/flash로 보내지 않고(필요하면 log만), 그 source의 집계 error는 정책·capability가 허용하는 한 한 번 계속 보냅니다. 감지 경로, 정책과 marker 부재 시 동작은 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
 
 ## cmux 프로토콜
 
@@ -75,7 +78,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 `pi-presence:update:v1`은 같은 Pi 프로세스의 event bus 입력입니다. V1 payload, 순서 fence, 추가 count와 progress 선택 규칙은 [이벤트 계약](docs/event-contract.md)을 따릅니다. 내장 source `pi`와 todo source `pi-todo`는 예약되어 외부 payload로는 수락하지 않습니다.
 
-소비자는 세션 시작 시 다음 ready 광고를 냅니다. 이는 생산자에게 현재 상태 재발행을 요청하는 신호일 뿐 실행·취소·재시도 권한을 주지 않습니다.
+소비자는 세션 시작 시 다음 ready 광고를 냅니다. 이는 생산자에게 현재 상태 재발행을 요청하는 신호일 뿐 실행·취소·재시도 권한을 주지 않습니다. ready replay의 `attention`은 반드시 `none`이므로 과거 완료·실패를 다시 알리지 않습니다.
 
 ```ts
 pi.events.emit("pi-presence:ready:v1", {
@@ -120,7 +123,7 @@ bun run ci
 bun pm pack --dry-run
 ```
 
-자동 검증은 가짜 Unix 소켓과 단위/통합 경로를 사용합니다. 실행 중인 cmux 서버에 대한 live 검증은 이 저장소에서 주장하지 않습니다.
+자동 검증은 consumer 쪽 generic producer shape, 검토한 exact child-profile suppression, fake Unix socket과 정적 namespace를 사용합니다. 실행 중인 `pi-subagent`·`pi-cmux`의 load order나 root aggregate/child `inherit` 공존, cmux 서버의 live 연동은 이 저장소에서 검증하거나 주장하지 않습니다.
 
 ## 라이선스
 

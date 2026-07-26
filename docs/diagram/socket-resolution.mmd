@@ -24,7 +24,7 @@ flowchart TB
   CmuxIdentity --> Gate
   ValidSocket --> Gate
   Gate{Identity and socket<br/>both resolved?}
-  Gate -->|no| Disabled[Presence session<br/>disabled, fail-closed]
+  Gate -->|no| Disabled[cmux client/output disabled;<br/>process-local observer may continue]
   Gate -->|yes| ClientCreate[Create PresenceClient +<br/>UnixSocketTransport]
 
   subgraph Hook[official-hook.ts: precedence]
@@ -37,7 +37,7 @@ flowchart TB
     HookRead -->|missing/unreadable| HookAbsent[No official hook]
   end
 
-  HookDetected --> Precedence[Suppress native lifecycle,<br/>feed, meta, auto-title,<br/>resume fallback, completion attention]
+  HookDetected --> Precedence[Suppress native lifecycle,<br/>feed, meta, auto-title,<br/>resume fallback, local completion,<br/>and pi-subagent success native alert;<br/>external attention + pi-subagent error eligible]
   HookAbsent --> OptIn[PresenceConfig opt-in flags<br/>gate each remaining feature]
   HookOff --> OptIn
 

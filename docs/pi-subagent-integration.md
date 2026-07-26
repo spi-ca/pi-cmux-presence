@@ -1,10 +1,10 @@
-# `pi-subagent` generic producer 계약·예시
+# `pi-subagent` 선택 producer 연동과 attention UX
 
-## 범위
+## 범위와 의존성
 
-이 문서는 `pi-cmux-presence`가 소비하는 **generic producer 계약**과 `pi-subagent`에 적용할 수 있는 예시를 설명합니다. 이 저장소는 `pi-subagent`를 import하거나 dependency로 선언하지 않으며, 외부 패키지의 현재 구현·production entrypoint·동작 parity를 검증하거나 단정하지 않습니다. 두 패키지를 함께 쓸 때의 기대 계약은 [이벤트 계약](event-contract.md)뿐입니다.
+`pi-cmux-presence`는 `pi-subagent`를 import하거나 dependency로 선언하지 않습니다. `pi-subagent`가 같은 Pi 프로세스 event bus에서 [`pi-presence:update:v1`](event-contract.md)을 발행하는 경우에만 이 consumer가 선택적으로 summary를 렌더링합니다. 따라서 이 문서는 외부 패키지의 설치, production entrypoint, 실행 방식 또는 현재 구현 parity를 보장하지 않습니다.
 
-이 계약을 채택하는 producer는 Pi의 같은 프로세스 event bus에서 현재 `sessionId`, 자신이 소유한 `generation`·단조 증가 `sequence`, 비예약 `source.id`, state/count를 넣어 발행합니다. 선택 `progress`, `usage`, `attention`은 실제로 제공할 수 있는 경우에만 포함합니다. consumer는 source별 fence와 [이벤트 계약](event-contract.md)에 정의된 source 상한을 적용하며 `pi`·`pi-todo` 예약 source는 외부 입력으로 수락하지 않습니다.
+일반 producer는 현재 `sessionId`, 자신이 소유한 `generation`·단조 증가 `sequence`, 비예약 `source.id`, state/count를 넣어 발행합니다. `pi`와 `pi-todo`는 예약 source라 외부 입력으로 수락되지 않습니다. `pi-subagent` 연동에 사용할 source ID는 정확히 `"pi-subagent"`입니다. label과 kind는 표시용 safe text일 뿐 routing authority가 아니며, `"pi-subagent"`와 비슷한 다른 ID에는 아래의 special attention 정책이 적용되지 않습니다.
 
 ```ts
 pi.events.emit("pi-presence:update:v1", {
@@ -15,49 +15,59 @@ pi.events.emit("pi-presence:update:v1", {
   source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
   state: "running",
   counts: { active, completed, failed, queued, cancelled, total },
-  // 실제 producer progress가 있을 때만 포함
-  progress: { value: completed / total },
+  // 실제 producer가 보유한 경우에만 포함
+  progress: total > 0 ? { value: completed / total } : undefined,
+  attention: "none",
 });
 ```
 
-`waiting`과 가산 `queued`/`cancelled`/`total`은 scheduler 집계를 표현할 수 있습니다. count는 각각 0–1,000,000이어야 하며 consumer가 상관관계나 progress를 추정하지 않습니다. `total`이 0인 경우 producer는 progress를 생략해야 합니다. 예시의 `source.id: "pi-subagent"`는 선택일 뿐, consumer가 특정 외부 package를 특별 취급하지는 않습니다.
+이 event는 cmux API나 lifecycle 명령 채널이 아닙니다. `pi-subagent` producer가 이를 발행해도 feed, meta block, workspace title, resume fallback 또는 live cmux target/focus mutation이 활성화되지 않습니다. 해당 기능은 `pi-cmux-presence` 자신의 opt-in 설정·capability와 별개이며, focus를 읽을 신뢰할 수 있는 read-only capability도 없으므로 focus 기반 suppress나 foreground로의 handoff는 지원하지 않습니다.
 
-## ready와 재발행
+root aggregate와 child `inherit` 같은 실행·집계 규칙은 producer 쪽의 책임이며 이 consumer가 의존하거나 조정하는 계약이 아닙니다. 이 저장소는 그런 외부 규칙이나 두 package의 실제 load order를 실행해 검증하지 않습니다. managed child가 이 extension을 로드하지 않았다면 status/progress/log/notification/flash를 포함한 이 consumer 동작은 요구되지 않으며, root aggregate·child lifecycle은 그대로 producer 소유입니다.
 
-presence consumer는 session start 뒤 `pi-presence:ready:v1`으로 `cmux-status`, `cmux-progress`, `cmux-attention` capability를 광고합니다. ready는 consumer UI capability와 replay 요청일 뿐 producer의 실행 권한을 바꾸지 않습니다.
+## scheduler summary 규칙
 
-이 계약을 구현하는 producer는 matching `sessionId`의 ready를 받으면 현재 보유 summary를 새 sequence로 다시 발행할 수 있습니다. 재발행은 `attention: "none"`으로 하여 이전 완료 알림을 되풀이하지 않는 것이 권장됩니다. event는 durable하지 않으므로 reload, consumer 재시작, session 경계에서 producer가 상태 표시 연속성을 원하면 이 재발행 경로가 필요합니다.
+`waiting`은 **scheduler에 queued 작업만 있는 상태**를 뜻합니다. 즉 producer는 `active: 0` 및 실제 `queued` count가 있을 때에만 사용해야 하며, 부모에게 결과를 넘기는 중, foreground/background 전환, detached target, user input/permission 대기, 또는 replay 자체를 뜻하는 표지로 사용해서는 안 됩니다. 실행 중인 작업은 `running`과 `active`로, 실제 종료는 `success`/`error`/`cancelled`과 누적 count로 표현합니다.
 
-## lifecycle authority 경계
+`completed`·`failed`·`cancelled`은 generation 안에서 누적 단조 증가시키는 summary입니다. `total`이 `0`이면 progress를 생략합니다. consumer는 count 간 산술 관계와 상세 progress를 추정하지 않습니다. task 제목·설명, prompt, output, cwd, credential, private target ID는 넣지 마세요. label은 형식·길이만 검증·축약되며 의미 기반 redaction은 하지 않습니다.
 
-이 연동은 observer 데이터 흐름입니다. `pi-cmux-presence`는 다음을 하지 않으며 generic producer가 이를 요청해서도 안 됩니다.
+`attention`은 background 관찰용 요약 신호입니다. `background` notification policy는 cmux focus나 실제 foreground/background 상태를 판별하지 않습니다. producer의 취소, foreground 전환, parent handoff 또는 ready replay는 attention이 아니며 `attention: "none"`을 사용합니다. 특히 cancellation은 status-only이므로 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log가 되지 않습니다. matching ready에 대한 replay는 새 sequence와 `attention: "none"`으로 현재 summary만 다시 발행합니다.
 
-- subagent 실행·취소·retry·scheduler/queue·lease·reaper·cleanup 결정
-- foreground/background 또는 detached target의 소유·전환
-- invocation 결과 반환, Pi interactive lifecycle 변경, resume 정책 결정
-- producer state를 보고 terminal action을 실행하거나 state를 교정
+## exact source의 terminal attention
 
-그 authority는 producer를 소유한 외부 패키지에 남습니다. presence consumer는 수락된 payload를 축약 status/progress/attention으로 best-effort 렌더링할 뿐입니다. socket 실패, validation 거부, capability 부재는 producer lifecycle을 실패시키지 않아야 합니다.
+일반 producer의 attention은 generic 경로로 처리됩니다. 정확히 `source.id: "pi-subagent"`만 consumer의 누적 terminal attention 정책을 사용합니다. 이 정책은 observer의 표시·알림 정책일 뿐 producer lifecycle authority를 바꾸지 않습니다.
 
-## `pi-cmux`와의 기대 계약·비목표
+1. consumer는 같은 generation의 이전 `completed`·`failed`·`cancelled` baseline과 현재 count의 delta를 비교합니다. success/info는 `completed` 증가, error는 `failed` 증가가 있어야 terminal 후보입니다. `cancelled` 상태와 cancellation delta는 attention을 만들지 않습니다.
+2. 첫 update 또는 generation 변경 뒤의 non-`none` attention에는 신뢰할 과거 baseline이 없습니다. 이 경우 count를 과거 완료로 해석하지 않는 unknown live signal만 가능합니다. 어느 누적 count든 감소하면 consumer는 해당 update와 쌓인 burst를 fail-closed로 버리고 새 baseline부터 다시 시작합니다.
+3. success terminal은 첫 success부터 고정 450ms, error terminal은 첫 error부터 고정 100ms window에서 같은 burst를 모읍니다. 부모 Pi run이 활성이어도 window는 닫히며, 뒤따른 terminal은 deadline을 연장하지 않습니다. window가 닫힌 뒤에도 같은 부모 run·generation에 연결된 terminal은 새 고정 window를 시작할 수 있고, 그 delta는 같은 부모 aggregate에 더해져 settlement에서 notification 한 번으로 확정될 수 있습니다. settlement가 열린 window 안에 도착하면 dispatch는 window 종료까지 보류합니다. 활성 부모에 연결된 error는 window 뒤 settlement를 기다릴 수 있지만 최초 error부터 최대 10초에 한 번 dispatch하며, 그 timeout은 해당 부모 run의 뒤늦은 settlement만 fence해 중복 native attention을 막습니다. 비활성 부모에서 시작된 error는 독립적이므로 100ms 안에 부모가 시작해도 그 부모를 기다리지 않습니다. 같은 aggregate에서는 error가 success보다 우선합니다.
+4. 이 semantic terminal coalescing은 Unix socket queue의 latest-write-wins와 다릅니다. queue 방식은 아직 실행하지 않은 같은 UI key의 전송을 최신 요청으로 바꾸는 최적화이고, terminal coalescing은 count delta와 parent lifecycle을 사용해 user-facing alert를 한 번으로 만드는 정책입니다.
 
-`pi-subagent`가 이 계약을 채택한다면 기대되는 범위는 `pi-cmux-presence`가 소비하는 V1 summary의 state, 필수/가산 counts, 실제 progress, attention, ready replay입니다. wire schema는 usage도 허용하지만, 어떤 외부 producer가 이를 발행하는지는 이 저장소에서 검증하지 않습니다. 같은 summary를 생산한다고 해서 별도 `pi-cmux` UX, native cmux CLI dashboard 또는 그 고유 event contract와 동작·표시·설정이 같다는 뜻은 아닙니다.
+성공 child aggregate와 성공 부모가 실제 `agent_settled`에서 관찰되어 함께 확정된 경우에만 title은 정확히 `Pi 응답 준비됨`입니다. 이 문구는 child 완료만으로 parent 응답이 준비되었다고 주장하지 않으며, settlement 관찰 전에는 사용하지 않습니다. host가 `agent_settled` 등록을 지원하지 않을 때만 `agent_end` fallback이 사용됩니다.
 
-특히 이 연동의 비목표는 다음과 같습니다.
+공식 cmux hook이 우선하면 이 exact source의 버퍼된 success는 native notification/flash로 보내지 않습니다. `PI_CMUX_PRESENCE_LOG=true`이면 안전한 집계 log는 남을 수 있습니다. 집계 error는 해당 policy와 V2 capability가 허용하면 한 번 notification/flash할 수 있습니다. 이 예외는 일반 외부 producer attention이 항상 hook을 통과한다는 이전 해석을 대체합니다.
 
-- `pi-cmux` 패키지를 설치·로드·설정하거나 그 API를 호출하는 것
-- native dashboard event를 이름만 바꾸어 무검증으로 전달하는 것
-- task/prompt/raw output/cwd/credential/private target ID를 presence event로 복사하는 것
-- public summary에 없는 progress·token·cost·context를 합성하는 것
-- presence observer에 lifecycle authority를 이전하거나 자동 action을 부여하는 것
+## notification·flash 선택
 
-이 계약은 외부 producer가 cmux CLI나 presence socket을 직접 호출하지 않을 것을 요구하지도, 반대로 호출한다고 가정하지도 않습니다. 같은 process에서 별도 consumer나 `pi-cmux`를 함께 설치할 때의 중복 출력 방지는 운영자가 각 consumer의 설정으로 관리해야 합니다. 이 문서는 외부 구현과의 live parity를 주장하지 않습니다.
+정확한 값과 precedence는 [`configuration.md`](configuration.md)를 기준으로 합니다.
 
-## 개인정보와 출력
+- `PI_CMUX_PRESENCE_NOTIFY_POLICY`: `errors` / `background`(기본) / `all` / `disabled`
+- `PI_CMUX_PRESENCE_FLASH_POLICY`: `errors`(기본) / `attention` / `disabled`
+- 레거시 `PI_CMUX_PRESENCE_NOTIFICATIONS=false` 또는 `PI_CMUX_PRESENCE_FLASH=false`는 enum보다 우선하는 강제 disable입니다. 레거시 `true`는 명시 enum을 덮어쓰지 않습니다. 빈 값이나 잘못된 enum은 각각 기본값으로 돌아갑니다.
 
-producer public payload에는 짧은 source label/state/count와 선택 수치만 넣어야 합니다. 문자열은 1–96 Unicode code points의 safe text여야 하며 task 제목·설명, prompt, output, 경로, credential, private target ID를 넣어서는 안 됩니다. consumer는 `source.label`과 `progress.label`을 형식 검증하고 목적지 한도로 축약하지만 의미 기반 redaction은 하지 않으므로, 계약을 지키지 않은 외부 label은 cmux에 표시될 수 있습니다.
+기본 구성에서는 성공에 notification/flash를 보장하지 않으며 success flash도 기본 비활성입니다. error attention은 허용된 policy와 capability 아래 한 번의 notification 및 한 번의 flash 대상입니다. 모든 출력은 socket 오류·거부·capability 부재 시 best-effort로 유실될 수 있고, producer 실행·결과·취소를 실패시키지 않습니다.
 
-cmux output은 설정과 capability를 다시 통과합니다. `PI_CMUX_PRESENCE_PROGRESS`가 꺼져 있으면 초기·종료 clear를 포함해 workspace progress를 전혀 변경하지 않고, attention은 log/notification/flash flag 및 V2 capability에 따라 다르게 생략될 수 있습니다. todo source가 progress를 제공하면 deterministic todo-first 규칙 때문에 일반 subagent progress보다 우선합니다.
+## ready, authority 및 실패 격리
+
+consumer는 session start 뒤 `pi-presence:ready:v1`으로 `cmux-status`, `cmux-progress`, `cmux-attention` capability를 광고합니다. 이는 재발행 요청과 UI 힌트일 뿐 실행 권한을 주지 않습니다. matching `sessionId`의 ready를 받은 producer는 retained summary를 새 sequence 및 `attention: "none"`으로 replay할 수 있습니다.
+
+이 연동은 observer-only입니다. `pi-cmux-presence`는 다음을 하지 않으며 producer가 요청해서도 안 됩니다.
+
+- subagent 실행·취소·retry·scheduler/queue·lease·reaper·cleanup을 결정하거나 결과를 반환
+- foreground/background 또는 detached target의 소유·전환, focus 추적, parent handoff를 수행
+- producer state를 보고 terminal action을 실행·교정하거나 Pi interactive lifecycle/resume 권한을 획득
+- task/prompt/raw output/cwd/credential/private target 정보를 event나 cmux output으로 복사
+
+수락 거부, event listener 오류, cmux capability 부재, socket 오류·시간 초과·큐 포화는 presence 출력만 잃게 할 수 있으며 producer lifecycle에는 전파되지 않아야 합니다. generic producer가 직접 cmux를 호출하는 것을 이 계약이 금지하거나 요구하지는 않지만, 이 패키지는 그런 외부 mutation을 조정하거나 live parity를 주장하지 않습니다.
 
 ## 확인 범위
 
@@ -67,4 +77,4 @@ cmux output은 설정과 capability를 다시 통과합니다. `PI_CMUX_PRESENCE
 bun run ci
 ```
 
-이는 contract parser, fence, ready replay, rendering과 fake socket 경로의 자동 검증입니다. 실행 중인 `pi-subagent`, `pi-cmux`, cmux 서버를 함께 연결한 live 동작, 외부 producer의 현재 구현, 또는 패키지 간 end-to-end parity는 이 저장소에서 검증하거나 주장하지 않습니다.
+이는 consumer 쪽 contract parser·source fence·cumulative attention policy·ready replay·rendering과 fake Unix socket 경로의 자동 검증입니다. 정적 fixture는 generic producer wire shape와 status-key namespace만, child-profile test는 검토한 exact suppression 값만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 동작, 외부 producer의 현재 구현, focus 상태 또는 패키지 간 end-to-end parity는 이 저장소에서 검증하거나 주장하지 않습니다.
