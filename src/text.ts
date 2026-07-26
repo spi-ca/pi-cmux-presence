@@ -1,4 +1,5 @@
-const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+import { replaceControlOrBidi } from "./validation.js";
+
 const ELLIPSIS = "…";
 
 export interface PresenceTextBudget {
@@ -20,8 +21,7 @@ function wellFormed(value: string): string {
 }
 
 export function normalizePresenceText(value: string): string {
-  return wellFormed(value)
-    .replace(CONTROL_OR_BIDI, " ")
+  return replaceControlOrBidi(wellFormed(value), " ")
     .replace(/\s+/g, " ")
     .trim();
 }

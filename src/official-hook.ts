@@ -13,10 +13,11 @@ export function expandHomeDirectory(value: string, homeDirectory = os.homedir())
 export async function officialHookDetected(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
   if (env.CMUX_PI_HOOKS_DISABLED === "1") return false;
 
+  const homeDirectory = env.HOME?.trim() || os.homedir();
   const configuredAgentDirectory = env.PI_CODING_AGENT_DIR?.trim();
   const agentDirectory = configuredAgentDirectory
-    ? expandHomeDirectory(configuredAgentDirectory)
-    : path.join(os.homedir(), ".pi", "agent");
+    ? expandHomeDirectory(configuredAgentDirectory, homeDirectory)
+    : path.join(homeDirectory, ".pi", "agent");
   const hookPath = path.join(agentDirectory, "extensions", "cmux-session.ts");
 
   try {

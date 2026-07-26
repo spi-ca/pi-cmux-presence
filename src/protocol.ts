@@ -1,3 +1,6 @@
+import { CMUX_UUID_RE } from "./identity.js";
+import { hasControlOrBidi, isPlainObject, isProtocolToken } from "./validation.js";
+
 export class PresenceProtocolError extends Error {}
 
 export const CMUX_TEXT_BYTES = {
@@ -24,16 +27,6 @@ export interface V2Request {
   params: Record<string, unknown>;
 }
 
-const TEXT_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
-const TOKEN = /^[A-Za-z0-9_.:-]{1,128}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-}
 
 function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   return Reflect.ownKeys(value).length === expected.length
@@ -49,18 +42,18 @@ function text(value: unknown, maxBytes: number = CMUX_TEXT_BYTES.v1Text): value 
   return typeof value === "string"
     && value.length > 0
     && Buffer.byteLength(value, "utf8") <= maxBytes
-    && !TEXT_CONTROL.test(value);
+    && !hasControlOrBidi(value);
 }
 
 function target(workspace: unknown, surface: unknown): boolean {
   return typeof workspace === "string"
-    && UUID.test(workspace)
+    && CMUX_UUID_RE.test(workspace)
     && typeof surface === "string"
-    && UUID.test(surface);
+    && CMUX_UUID_RE.test(surface);
 }
 
 function checkpoint(value: unknown): value is string {
-  return typeof value === "string" && TOKEN.test(value);
+  return isProtocolToken(value);
 }
 
 /** Validate each RPC shape before serializing it; no generic free-form params cross the socket. */
@@ -81,12 +74,12 @@ function validV2(request: V2Request): boolean {
     case "workspace.set_auto_title":
       return keys(params, ["workspace_id", "title"])
         && typeof params.workspace_id === "string"
-        && UUID.test(params.workspace_id)
+        && CMUX_UUID_RE.test(params.workspace_id)
         && text(params.title, CMUX_TEXT_BYTES.autoTitle);
     case "feed.push": {
       if (!keys(params, ["workspace_id", "surface_id", "event"])
         || !target(params.workspace_id, params.surface_id)
-        || !object(params.event)) {
+        || !isPlainObject(params.event)) {
         return false;
       }
 
@@ -119,7 +112,7 @@ function validV2(request: V2Request): boolean {
         && checkpoint(params.checkpoint_id)
         && params.kind === "pi"
         && params.source === "agent-hook"
-        && object(params.environment)
+        && isPlainObject(params.environment)
         && keys(params.environment, [])
         && text(params.command, CMUX_TEXT_BYTES.resumeCommand)
         && params.auto_resume === true;
@@ -132,7 +125,7 @@ function validV2(request: V2Request): boolean {
 }
 
 export function encodeV2(request: V2Request): string {
-  if (!Number.isSafeInteger(request.id) || request.id < 1 || !object(request.params) || !validV2(request)) {
+  if (!Number.isSafeInteger(request.id) || request.id < 1 || !isPlainObject(request.params) || !validV2(request)) {
     throw new PresenceProtocolError("Invalid V2 request.");
   }
 
@@ -155,13 +148,13 @@ export function decodeV2Response(line: string, id: number): unknown {
     throw new PresenceProtocolError("Invalid V2 JSON response.");
   }
 
-  if (!object(value) || value.id !== id || typeof value.ok !== "boolean") {
+  if (!isPlainObject(value) || value.id !== id || typeof value.ok !== "boolean") {
     throw new PresenceProtocolError("Invalid V2 response envelope.");
   }
   if (value.ok === true && keys(value, ["id", "ok", "result"])) return value.result;
   if (value.ok === false
     && keys(value, ["id", "ok", "error"])
-    && object(value.error)
+    && isPlainObject(value.error)
     && optionalKeys(value.error, ["code", "message"], ["code", "message"])
     && (typeof value.error.code === "string" || typeof value.error.code === "number")
     && typeof value.error.message === "string") {
@@ -178,7 +171,7 @@ function v1Part(value: string): string {
 }
 
 function v1Token(value: string): string {
-  if (!TOKEN.test(value)) throw new PresenceProtocolError("Invalid V1 token.");
+  if (!isProtocolToken(value)) throw new PresenceProtocolError("Invalid V1 token.");
   return value;
 }
 
@@ -202,8 +195,7 @@ function v1Color(value: string): string {
 }
 
 function rawMarkdown(value: string): string {
-  const invalidControl = /[\\\r\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
-    .test(value.replace(/[\n\t]/g, ""));
+  const invalidControl = hasControlOrBidi(value.replace(/[\n\t]/g, ""));
   if (!value || Buffer.byteLength(value, "utf8") > 1024 || invalidControl || value.includes("\\")) {
     throw new PresenceProtocolError("Invalid V1 markdown.");
   }

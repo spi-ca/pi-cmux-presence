@@ -52,6 +52,11 @@ async function exchange(
     socket.once("error", (error) => {
       finish(new PresenceTransportError(`Socket failure: ${error.message}`));
     });
+    const incompleteResponse = () => {
+      finish(new PresenceTransportError("Socket closed before a complete response."));
+    };
+    socket.once("end", incompleteResponse);
+    socket.once("close", incompleteResponse);
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > 16 * 1024 + 1) {
@@ -153,6 +158,14 @@ export class BoundedSocketQueue {
   async close(timeoutMs: number): Promise<void> {
     this.closed = true;
     const draining = this.drainPromise ?? Promise.resolve();
+    if (timeoutMs <= 0) {
+      this.abandon = true;
+      this.active?.abort();
+      this.rejectUndispatched();
+      await draining;
+      return;
+    }
+
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -228,7 +241,7 @@ export class UnixSocketTransport {
     );
   }
 
-  async close(): Promise<void> {
-    await this.queue.close(this.timeoutMs);
+  async close(timeoutMs = this.timeoutMs): Promise<void> {
+    await this.queue.close(timeoutMs);
   }
 }

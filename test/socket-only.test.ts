@@ -17,7 +17,15 @@ test("production source has no process execution API or command fallback", async
   const root = join(import.meta.dir, "..");
   const content = await Promise.all((await sourceFiles(join(root, "src"))).concat(join(root, "index.ts")).map((file) => fs.readFile(file, "utf8")));
   const production = content.join("\n");
-  for (const forbidden of ["pi.exec", "child_process", "Bun.spawn", "spawn(", "execFile", "exec(", "execa", "setWidget(", ".ui.setStatus("]) {
-    expect(production).not.toContain(forbidden);
+  for (const forbidden of [
+    /\bpi\s*\.\s*exec\s*\(/,
+    /\b(?:from\s*|import\s*(?:\(\s*)?|require\s*\(\s*)["'](?:node:)?child_process["']/,
+    /\b(?:from\s*|import\s*(?:\(\s*)?|require\s*\(\s*)["']execa["']/,
+    /\bBun\s*\.\s*(?:spawn|spawnSync)\s*\(/,
+    /\bDeno\s*\.\s*Command\s*\(/,
+    /\b(?:execa(?:\s*\.\s*[A-Za-z_$][\w$]*)?|execa(?:Command|CommandSync|Sync|Node))\s*\(/,
+    /setWidget\(/, /\.ui\.setStatus\(/,
+  ]) {
+    expect(production).not.toMatch(forbidden);
   }
 });

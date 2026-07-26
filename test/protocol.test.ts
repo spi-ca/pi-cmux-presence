@@ -13,6 +13,7 @@ describe("protocol codecs", () => {
     expect(() => encodeV2({ id: 2, method: "feed.push", params: { ...feed, event: { ...feed.event, hook_event_name: "UserPromptSubmit", tool_name: "todo" } } })).toThrow(PresenceProtocolError);
     expect(decodeV2Response('{"id":1,"ok":true,"result":{}}', 1)).toEqual({});
     expect(() => decodeV2Response('{"id":2,"ok":true,"result":{}}', 1)).toThrow(PresenceProtocolError);
+    expect(() => decodeV2Response('{"id":1,"ok":false,"error":{"code":"denied","message":"No access"}}', 1)).toThrow(PresenceProtocolError);
   });
   test("enforces UTF-8 byte limits for multibyte V1 and V2 fields", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";

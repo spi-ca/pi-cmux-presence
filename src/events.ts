@@ -1,3 +1,5 @@
+import { hasControlOrBidi, isPlainObject } from "./validation.js";
+
 export const PI_PRESENCE_UPDATE_EVENT = "pi-presence:update:v1" as const;
 export const PI_PRESENCE_READY_EVENT = "pi-presence:ready:v1" as const;
 const MAX_TEXT = 96;
@@ -29,9 +31,6 @@ export interface PresenceUpdate {
   attention?: "none" | "info" | "success" | "error";
 }
 
-function plainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-}
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.includes(key));
 }
@@ -42,7 +41,7 @@ function safeText(value: unknown): value is string {
     && value.length > 0
     && value.length <= MAX_TEXT * 2
     && [...value].length <= MAX_TEXT
-    && !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(value);
+    && !hasControlOrBidi(value);
 }
 
 /** Validate the host session fence before any presence side effects are created. */
@@ -62,7 +61,7 @@ function percent(value: unknown): value is number { return typeof value === "num
  */
 export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
   try {
-    if (!plainObject(value) || !hasOnlyKeys(value, ROOT_KEYS)) return null;
+    if (!isPlainObject(value) || !hasOnlyKeys(value, ROOT_KEYS)) return null;
     if (!hasOwn(value, "version") || !hasOwn(value, "sessionId") || !hasOwn(value, "generation") || !hasOwn(value, "sequence") || !hasOwn(value, "source") || !hasOwn(value, "state") || !hasOwn(value, "counts")) return null;
     const version = value.version;
     const sessionId = value.sessionId;
@@ -71,7 +70,7 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
     const rawSource = value.source;
     const state = value.state;
     const rawCounts = value.counts;
-    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !plainObject(rawSource) || !hasOnlyKeys(rawSource, SOURCE_KEYS) || !plainObject(rawCounts) || !hasOnlyKeys(rawCounts, COUNT_KEYS)) return null;
+    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !isPlainObject(rawSource) || !hasOnlyKeys(rawSource, SOURCE_KEYS) || !isPlainObject(rawCounts) || !hasOnlyKeys(rawCounts, COUNT_KEYS)) return null;
     if (!SOURCE_KEYS.every((key) => hasOwn(rawSource, key)) || !REQUIRED_COUNT_KEYS.every((key) => hasOwn(rawCounts, key))) return null;
     const sourceId = rawSource.id;
     const sourceLabel = rawSource.label;
@@ -87,7 +86,7 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
     let progress: PresenceUpdate["progress"];
     if (value.progress !== undefined) {
       const rawProgress = value.progress;
-      if (!plainObject(rawProgress) || !hasOnlyKeys(rawProgress, PROGRESS_KEYS) || !hasOwn(rawProgress, "value")) return null;
+      if (!isPlainObject(rawProgress) || !hasOnlyKeys(rawProgress, PROGRESS_KEYS) || !hasOwn(rawProgress, "value")) return null;
       const progressValue = rawProgress.value;
       const progressLabel = rawProgress.label;
       if (!metric(progressValue) || progressValue > 1 || (progressLabel !== undefined && !safeText(progressLabel))) return null;
@@ -97,7 +96,7 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
     let usage: PresenceUsage | undefined;
     if (value.usage !== undefined) {
       const rawUsage = value.usage;
-      if (!plainObject(rawUsage) || !hasOnlyKeys(rawUsage, USAGE_KEYS)) return null;
+      if (!isPlainObject(rawUsage) || !hasOnlyKeys(rawUsage, USAGE_KEYS)) return null;
       const tokens = rawUsage.tokens;
       const cost = rawUsage.cost;
       const contextPercent = rawUsage.contextPercent;
@@ -129,10 +128,10 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
 export interface PresenceReady { version: 1; sessionId: string; consumer?: { id: string; capabilities: string[] }; }
 export function parsePresenceReady(value: unknown): PresenceReady | null {
   try {
-    if (!plainObject(value) || !hasOnlyKeys(value, READY_KEYS) || value.version !== 1 || !safeText(value.sessionId)) return null;
+    if (!isPlainObject(value) || !hasOnlyKeys(value, READY_KEYS) || value.version !== 1 || !safeText(value.sessionId)) return null;
     const rawConsumer = value.consumer;
     if (rawConsumer === undefined) return { version: 1, sessionId: value.sessionId };
-    if (!plainObject(rawConsumer) || !hasOnlyKeys(rawConsumer, CONSUMER_KEYS) || !hasOwn(rawConsumer, "id") || !hasOwn(rawConsumer, "capabilities")
+    if (!isPlainObject(rawConsumer) || !hasOnlyKeys(rawConsumer, CONSUMER_KEYS) || !hasOwn(rawConsumer, "id") || !hasOwn(rawConsumer, "capabilities")
       || !safeText(rawConsumer.id) || !Array.isArray(rawConsumer.capabilities) || rawConsumer.capabilities.length > 16
       || !rawConsumer.capabilities.every((entry) => safeText(entry))) return null;
     return { version: 1, sessionId: value.sessionId, consumer: { id: rawConsumer.id, capabilities: [...rawConsumer.capabilities] } };

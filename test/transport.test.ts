@@ -2,13 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { fakeSocket } from "./helpers/fake-socket.js";
+import { fakeSocket, type FakeSocketResponse } from "./helpers/fake-socket.js";
 import { BoundedSocketQueue, UnixSocketTransport } from "../src/transport.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()?.(); });
 
-async function fixture(handler: (line: string) => string | undefined) {
+async function fixture(
+  handler: (line: string) => FakeSocketResponse,
+) {
   const dir = await fs.mkdtemp(join(os.tmpdir(), "presence-test-"));
   const server = await fakeSocket(join(dir, "socket"), handler);
   cleanup.push(async () => { await server.close(); await fs.rm(dir, { recursive: true, force: true }); });
@@ -26,6 +28,15 @@ describe("Unix socket transport", () => {
     const path = await fixture(() => undefined);
     const transport = new UnixSocketTransport(path, 100, 4);
     await expect(transport.request("request\n")).rejects.toThrow("timed out");
+    await transport.close();
+  });
+  test("rejects promptly when a socket ends without a complete response", async () => {
+    const path = await fixture(() => ({ end: true }));
+    const timeoutMs = 300;
+    const transport = new UnixSocketTransport(path, timeoutMs, 4);
+    const started = performance.now();
+    await expect(transport.request("request\n")).rejects.toThrow("closed before a complete response");
+    expect(performance.now() - started).toBeLessThan(timeoutMs / 2);
     await transport.close();
   });
   test("rejects a socket that is no longer owner-only before connecting", async () => {

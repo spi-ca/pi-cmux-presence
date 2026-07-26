@@ -28,6 +28,24 @@ test("entrypoint registers lifecycle and generic event observers without tools",
   }
 });
 
+test("entrypoint does not register observers when disabled", () => {
+  const previousEnabled = process.env.PI_CMUX_PRESENCE_ENABLED;
+  process.env.PI_CMUX_PRESENCE_ENABLED = "false";
+  try {
+    const hooks: string[] = [];
+    const events: string[] = [];
+    extension({
+      on(name: string) { hooks.push(name); },
+      events: { on(name: string) { events.push(name); }, emit() {} },
+    } as never);
+    expect(hooks).toEqual([]);
+    expect(events).toEqual([]);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.PI_CMUX_PRESENCE_ENABLED;
+    else process.env.PI_CMUX_PRESENCE_ENABLED = previousEnabled;
+  }
+});
+
 type Hook = (event: any, context?: any) => unknown;
 type EventHandler = (payload: unknown) => unknown;
 
@@ -67,8 +85,34 @@ function fakePi() {
   };
 }
 
+test("uses agent_end settlement only when agent_settled registration throws", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension({
+      ...pi.api,
+      on(name: string, handler: Hook) {
+        if (name === "agent_settled") throw new Error("unsupported lifecycle");
+        pi.api.on(name, handler);
+      },
+    } as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "fallback-session" } });
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] }, { isIdle: () => false });
+
+    const localUpdates = pi.emitted
+      .filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)
+      .map((event) => event.payload as PresenceUpdate)
+      .filter((event) => event.source.id === "pi");
+    expect(localUpdates.at(-1)).toMatchObject({ state: "success", counts: { active: 0, completed: 1 } });
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 const ENV_KEYS = [
-  "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_SOCKET_PATH", "PI_CODING_AGENT_DIR",
+  "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_SOCKET_PATH", "PI_CODING_AGENT_DIR", "CMUX_PI_HOOKS_DISABLED", "HOME",
   "PI_CMUX_PRESENCE_ENABLED", "PI_CMUX_PRESENCE_TIMEOUT_MS", "PI_CMUX_PRESENCE_MAX_QUEUE",
   "PI_CMUX_PRESENCE_PROGRESS", "PI_CMUX_PRESENCE_NOTIFICATIONS", "PI_CMUX_PRESENCE_FLASH",
   "PI_CMUX_PRESENCE_LOG", "PI_CMUX_PRESENCE_SIDEBAR", "PI_CMUX_PRESENCE_NATIVE_LIFECYCLE",
@@ -98,15 +142,22 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for fake socket requests.");
 }
 
-async function presenceFixture(firstCapabilityGate?: () => Promise<void>) {
+async function presenceFixture(
+  firstCapabilityGate?: () => Promise<void>,
+  requestGate?: (line: string) => Promise<void>,
+  advertisedMethods = ["notification.create_for_surface"],
+) {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const surfaceId = "00000000-0000-4000-8000-000000000002";
   const lines: string[] = [];
+  const requests: Array<{ line: string; at: number }> = [];
   const directory = await fs.mkdtemp(join(os.tmpdir(), "presence-lifecycle-"));
   const socketPath = join(directory, "cmux.sock");
   let capabilityRequests = 0;
   const server = await fakeSocket(socketPath, async (line) => {
     lines.push(line);
+    requests.push({ line, at: performance.now() });
+    await requestGate?.(line);
     if (line.startsWith("{")) {
       const request = JSON.parse(line) as { id: number; method: string };
       if (request.method === "system.capabilities") {
@@ -114,7 +165,7 @@ async function presenceFixture(firstCapabilityGate?: () => Promise<void>) {
         if (capabilityRequests === 1) await firstCapabilityGate?.();
       }
       const result = request.method === "system.capabilities"
-        ? { protocol: "cmux-socket", version: 2, methods: ["notification.create_for_surface"] }
+        ? { protocol: "cmux-socket", version: 2, methods: advertisedMethods }
         : {};
       return JSON.stringify({ id: request.id, ok: true, result });
     }
@@ -135,7 +186,7 @@ async function presenceFixture(firstCapabilityGate?: () => Promise<void>) {
     PI_CMUX_PRESENCE_FINAL_CLEAR_MS: "60000",
   });
   return {
-    workspaceId, surfaceId, lines,
+    workspaceId, surfaceId, lines, requests,
     cleanup: async () => { restoreEnv(); await server.close(); await fs.rm(directory, { recursive: true, force: true }); },
   };
 }
@@ -190,6 +241,49 @@ test("lifecycle observes Pi and generic producers through only the targeted fake
       }),
     ]));
     expect(v2.some((request) => request.method === "surface.trigger_flash")).toBe(false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("feed lifecycle sends only allowed privacy-minimal fields", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["feed.push"]);
+  try {
+    process.env.PI_CMUX_PRESENCE_FEED = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "feed-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("before_agent_start");
+    await pi.lifecycle("tool_execution_start", { toolCallId: "call-1", toolName: "todo" });
+    await pi.lifecycle("tool_execution_end", { toolCallId: "call-1", toolName: "todo" });
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.filter((line) => line.includes('"method":"feed.push"')).length === 5);
+
+    const feedEvents = fixture.lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as { method: string; params: { event: Record<string, unknown> } })
+      .filter((request) => request.method === "feed.push")
+      .map((request) => request.params.event);
+    expect(feedEvents.map((event) => event.hook_event_name)).toEqual([
+      "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
+    ]);
+    for (const event of feedEvents) {
+      expect(Object.keys(event).sort()).toEqual([
+        "_source", "hook_event_name", "session_id", "surface_id", "tool_call_id", "tool_name", "workspace_id",
+      ].filter((key) => key in event).sort());
+      expect(event).toMatchObject({
+        session_id: sessionId,
+        _source: "pi",
+        workspace_id: fixture.workspaceId,
+        surface_id: fixture.surfaceId,
+      });
+    }
+    expect(feedEvents[0]).toEqual({ session_id: sessionId, hook_event_name: "SessionStart", _source: "pi", workspace_id: fixture.workspaceId, surface_id: fixture.surfaceId });
+    expect(feedEvents[2]).toMatchObject({ tool_call_id: "call-1", tool_name: "todo" });
+    await pi.lifecycle("session_shutdown");
   } finally {
     await fixture.cleanup();
   }
@@ -335,15 +429,36 @@ test("progress-disabled sessions never mutate workspace progress during startup 
   }
 });
 
-test("tilde agent directories preserve official hook precedence", async () => {
+test("CMUX_PI_HOOKS_DISABLED bypasses an otherwise detected official hook", async () => {
   const fixture = await presenceFixture();
-  const agentDir = await fs.mkdtemp(join(os.homedir(), ".presence-official-"));
+  const agentDir = await fs.mkdtemp(join(os.tmpdir(), "presence-disabled-hook-"));
   try {
     await fs.mkdir(join(agentDir, "extensions"));
+    await fs.writeFile(join(agentDir, "extensions", "cmux-session.ts"), "cmux-pi-session-extension-marker v2");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.CMUX_PI_HOOKS_DISABLED = "1";
+    const pi = fakePi();
+    extension(pi.api as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "disabled-hook-session" } });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("set_agent_pid ")));
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    await fs.rm(agentDir, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
+test("tilde agent directories preserve official hook precedence with a temporary HOME", async () => {
+  const fixture = await presenceFixture();
+  const home = await fs.mkdtemp(join(os.tmpdir(), "presence-home-"));
+  const agentDir = join(home, ".presence-official-");
+  try {
+    await fs.mkdir(join(agentDir, "extensions"), { recursive: true });
     await fs.writeFile(
       join(agentDir, "extensions", "cmux-session.ts"),
       "cmux-pi-session-extension-marker v2",
     );
+    process.env.HOME = home;
     process.env.PI_CODING_AGENT_DIR = `~/${basename(agentDir)}`;
 
     const pi = fakePi();
@@ -355,7 +470,7 @@ test("tilde agent directories preserve official hook precedence", async () => {
     expect(fixture.lines.some((line) => line.startsWith("set_agent_pid "))).toBe(false);
     expect(fixture.lines.some((line) => line.startsWith("set_agent_lifecycle "))).toBe(false);
   } finally {
-    await fs.rm(agentDir, { recursive: true, force: true });
+    await fs.rm(home, { recursive: true, force: true });
     await fixture.cleanup();
   }
 });
@@ -419,6 +534,80 @@ test("an invalid replacement session clears the previous session outputs", async
   }
 });
 
+test("detached cleanup sends every retained status clear beyond one close timeout", async () => {
+  const responseDelayMs = 6;
+  const fixture = await presenceFixture(undefined, async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, responseDelayMs));
+  });
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "cleanup-tail-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("set_status ")));
+
+    for (let index = 0; index < 40; index += 1) {
+      pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+        version: 1,
+        sessionId,
+        generation: 1,
+        sequence: index + 1,
+        source: { id: `retained-${index}`, label: `Retained ${index}`, kind: "task" },
+        state: "running",
+        counts: { active: 1, completed: 0, failed: 0 },
+      });
+    }
+
+    await pi.lifecycle("session_shutdown");
+
+    const clears = fixture.requests.filter((request) => request.line.startsWith("clear_status "));
+    expect(clears).toHaveLength(40);
+    for (let index = 0; index < 40; index += 1) {
+      const key = presenceStatusKey(`retained-${index}`, fixture.surfaceId);
+      expect(clears.some((request) => request.line.startsWith(`clear_status ${key} `))).toBe(true);
+    }
+    expect(clears.at(-1)!.at - clears[0]!.at).toBeGreaterThan(100);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("silent cmux teardown is bounded by the aggregate cleanup deadline", async () => {
+  let silenceClears = false;
+  const fixture = await presenceFixture(undefined, async (line) => {
+    if (silenceClears && line.startsWith("clear_status ")) {
+      await new Promise<void>(() => {});
+    }
+  });
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "silent-cleanup-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("set_status ")));
+
+    for (let index = 0; index < 64; index += 1) {
+      pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+        version: 1,
+        sessionId,
+        generation: 1,
+        sequence: index + 1,
+        source: { id: `silent-${index}`, label: `Silent ${index}`, kind: "task" },
+        state: "running",
+        counts: { active: 1, completed: 0, failed: 0 },
+      });
+    }
+
+    silenceClears = true;
+    const started = performance.now();
+    await pi.lifecycle("session_shutdown");
+    expect(performance.now() - started).toBeLessThan(1_100);
+    expect(fixture.requests.filter((request) => request.line.startsWith("clear_status ")).length).toBeLessThan(9);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("shutdown teardown finishes before a concurrently started session publishes", async () => {
   const fixture = await presenceFixture();
   try {
@@ -446,6 +635,45 @@ test("shutdown teardown finishes before a concurrently started session publishes
     expect(newStatusIndex).toBeGreaterThan(clearIndex);
     await pi.lifecycle("session_shutdown");
   } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a session change during owned-progress setup does not retain the stale client", async () => {
+  let releaseProgress!: () => void;
+  const progressGate = new Promise<void>((resolve) => { releaseProgress = resolve; });
+  let blockFirstProgressClear = true;
+  const fixture = await presenceFixture(undefined, async (line) => {
+    if (blockFirstProgressClear && line.startsWith("clear_progress ")) {
+      blockFirstProgressClear = false;
+      await progressGate;
+    }
+  });
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const first = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "owned-progress-old" },
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("clear_progress ")));
+
+    const second = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "owned-progress-current" },
+    });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const completed = await Promise.race([
+      second.then(() => true),
+      new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 100); }),
+    ]);
+    if (deadline) clearTimeout(deadline);
+    expect(completed).toBe(true);
+    expect(pi.emitted.some((event) => (event.payload as PresenceUpdate).sessionId === "owned-progress-current")).toBe(true);
+
+    releaseProgress();
+    await first;
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    releaseProgress();
     await fixture.cleanup();
   }
 });

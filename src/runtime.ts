@@ -76,7 +76,7 @@ export class PresenceRuntime {
   private usage = new UsageTracker();
   private terminal: TerminalState = "success";
   private hadToolError = false;
-  private shownProgress: string | null = null;
+  private shownProgress = false;
   private clearTimer: ReturnType<typeof setTimeout> | undefined;
   private officialHook = false;
   private statusScope: string | undefined;
@@ -156,9 +156,12 @@ export class PresenceRuntime {
         await created.close();
         return;
       }
-      this.client = created;
       await created.initializeOwnedProgress();
-      if (!this.isCurrent(epoch, nextSessionId)) return;
+      if (!this.isCurrent(epoch, nextSessionId)) {
+        await created.close();
+        return;
+      }
+      this.client = created;
     }
 
     await this.initializeOptionalIntegrations(nextSessionId);
@@ -247,7 +250,6 @@ export class PresenceRuntime {
   }
 
   handleAgentSettled(context: unknown): void {
-    if (!this.sessionId || !this.active) return;
     try {
       if (typeof context === "object" && context !== null) {
         const isIdle = (context as { isIdle?: unknown }).isIdle;
@@ -256,7 +258,32 @@ export class PresenceRuntime {
     } catch {
       return;
     }
+    this.finalizeAgent();
+  }
 
+  /** Used only when a host rejects agent_settled registration. */
+  handleAgentEndFallback(): void {
+    this.finalizeAgent();
+  }
+
+  handleSessionInfoChanged(event: unknown): void {
+    if (!this.sessionId || this.officialHook || !this.config.autoTitle) return;
+    if (typeof event !== "object" || event === null) return;
+    const name = (event as { name?: unknown }).name;
+    if (typeof name !== "string" || !name.trim()) return;
+    void this.client?.autoTitle(formatAutoTitle(name, Math.min(80, this.config.maxLabelChars)));
+  }
+
+  async shutdownSession(): Promise<void> {
+    ++this.sessionEpoch;
+    this.cancelFinalClear();
+
+    const closingSession = this.detachCurrentSession();
+    await this.cleanupDetachedSession(closingSession);
+  }
+
+  private finalizeAgent(): void {
+    if (!this.sessionId || !this.active) return;
     this.active = false;
     this.updateContextUsage();
     if (this.terminal === "error") this.failed += 1;
@@ -277,22 +304,6 @@ export class PresenceRuntime {
     }
   }
 
-  handleSessionInfoChanged(event: unknown): void {
-    if (!this.sessionId || this.officialHook || !this.config.autoTitle) return;
-    if (typeof event !== "object" || event === null) return;
-    const name = (event as { name?: unknown }).name;
-    if (typeof name !== "string" || !name.trim()) return;
-    void this.client?.autoTitle(formatAutoTitle(name, Math.min(80, this.config.maxLabelChars)));
-  }
-
-  async shutdownSession(): Promise<void> {
-    ++this.sessionEpoch;
-    this.cancelFinalClear();
-
-    const closingSession = this.detachCurrentSession();
-    await this.cleanupDetachedSession(closingSession);
-  }
-
   private beginSession(sessionId: string, context: unknown): void {
     this.sessionId = sessionId;
     this.registry.start(sessionId);
@@ -306,7 +317,7 @@ export class PresenceRuntime {
     this.usage = new UsageTracker();
     this.terminal = "success";
     this.hadToolError = false;
-    this.shownProgress = null;
+    this.shownProgress = false;
     this.officialHook = false;
     this.statusScope = undefined;
   }
@@ -335,7 +346,7 @@ export class PresenceRuntime {
     this.usage = new UsageTracker();
     this.terminal = "success";
     this.hadToolError = false;
-    this.shownProgress = null;
+    this.shownProgress = false;
     this.officialHook = false;
     this.statusScope = undefined;
   }
@@ -401,8 +412,8 @@ export class PresenceRuntime {
   private renderProgress(): void {
     const next = selectProgress(this.registry.snapshot());
     if (!next) {
-      if (this.shownProgress !== null) void this.client?.clearProgress();
-      this.shownProgress = null;
+      if (this.shownProgress) void this.client?.clearProgress();
+      this.shownProgress = false;
       return;
     }
 
@@ -410,7 +421,7 @@ export class PresenceRuntime {
       next.progress!.value,
       formatProgressText(next, this.config.maxLabelChars),
     );
-    this.shownProgress = next.source.id;
+    this.shownProgress = true;
   }
 
   private publish(
@@ -502,26 +513,45 @@ export class PresenceRuntime {
 
   private cleanupDetachedSession(detached: DetachedSession): Promise<void> {
     const client = detached.client;
+    const detachedSessionId = detached.sessionId;
     if (!client) return this.clientCloseBarrier;
 
     const cleanup = this.clientCloseBarrier.then(async () => {
-      await client.clearProgress();
-      for (const event of detached.retainedEvents) {
-        const key = presenceStatusKey(event.source.id, detached.statusScope);
-        void client.clearStatus(key);
-      }
+      const budgetMs = Math.min(5_000, Math.max(750, this.config.timeoutMs * 4));
+      const deadline = performance.now() + budgetMs;
+      let expired = false;
+      const abort = () => {
+        expired = true;
+        // Closing first makes all later cleanup calls no-ops and aborts active socket work.
+        void client.close(0).catch(() => {});
+      };
+      const timer = setTimeout(abort, budgetMs);
+      try {
+        const bestEffort = async (operation: () => Promise<void>) => {
+          if (expired) return;
+          await operation().catch(() => {});
+        };
 
-      if (!detached.officialHook) {
-        if (this.config.nativeLifecycle) {
-          void client.lifecycle("idle");
-          void client.clearPiPid();
+        await bestEffort(() => client.clearProgress());
+        for (const event of detached.retainedEvents) {
+          await bestEffort(() => client.clearStatus(presenceStatusKey(event.source.id, detached.statusScope)));
         }
-        if (this.config.metaBlock) void client.clearMeta();
-        if (this.config.resumeFallback && detached.sessionId) {
-          await client.clearOwnedResumeFallback(detached.sessionId);
+
+        if (!detached.officialHook) {
+          if (this.config.nativeLifecycle) {
+            await bestEffort(() => client.lifecycle("idle"));
+            await bestEffort(() => client.clearPiPid());
+          }
+          if (this.config.metaBlock) await bestEffort(() => client.clearMeta());
+          if (this.config.resumeFallback && detachedSessionId) {
+            await bestEffort(() => client.clearOwnedResumeFallback(detachedSessionId));
+          }
         }
+      } finally {
+        clearTimeout(timer);
+        const remainingMs = Math.max(0, deadline - performance.now());
+        await client.close(expired ? 0 : remainingMs).catch(() => {});
       }
-      await client.close();
     }).catch(() => {
       // Session teardown is best-effort and still releases the transition barrier.
     });

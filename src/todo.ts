@@ -1,4 +1,5 @@
-import { MAX_COUNT, type PresenceUpdate } from "./events.js";
+import type { PresenceUpdate } from "./events.js";
+import { isPlainObject } from "./validation.js";
 
 const MAX_TASKS = 256;
 const MAX_FIELDS = 32;
@@ -8,12 +9,13 @@ const DETAIL_KEYS = new Set(["action", "params", "tasks", "nextId", "error"]);
 const TASK_KEYS = new Set(["id", "status", "content", "subject", "title", "description", "activeForm", "priority", "tags", "metadata", "createdAt", "updatedAt", "completedAt", "dueDate", "dependsOn", "blockedBy", "owner"]);
 
 type ToolInfoLike = { name?: unknown; sourceInfo?: { path?: unknown; source?: unknown; scope?: unknown; origin?: unknown } };
-function plain(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null); }
+
 function ownData(value: Record<string, unknown>, keys: Iterable<PropertyKey>, limit = MAX_FIELDS): boolean {
+  const allowed = new Set(keys);
   const names = Reflect.ownKeys(value);
   if (names.length > limit) return false;
   for (const key of names) {
-    if (typeof key !== "string" || !new Set(keys).has(key)) return false;
+    if (typeof key !== "string" || !allowed.has(key)) return false;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor || !("value" in descriptor)) return false;
   }
@@ -24,7 +26,7 @@ function safeTree(value: unknown, depth = 0): boolean {
   if (typeof value === "number") return Number.isFinite(value);
   if (depth >= 4) return false;
   if (Array.isArray(value)) return value.length <= MAX_TASKS && value.every((item) => safeTree(item, depth + 1));
-  if (!plain(value) || Reflect.ownKeys(value).length > MAX_FIELDS) return false;
+  if (!isPlainObject(value) || Reflect.ownKeys(value).length > MAX_FIELDS) return false;
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") return false;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -34,10 +36,10 @@ function safeTree(value: unknown, depth = 0): boolean {
 }
 function owner(tools: unknown): string | null {
   if (!Array.isArray(tools)) return null;
-  const matches = tools.filter((tool): tool is ToolInfoLike => plain(tool) && tool.name === "todo");
+  const matches = tools.filter((tool): tool is ToolInfoLike => isPlainObject(tool) && tool.name === "todo");
   if (matches.length !== 1) return null;
   const info = matches[0].sourceInfo;
-  if (!plain(info) || typeof info.path !== "string" || typeof info.source !== "string" || typeof info.scope !== "string" || typeof info.origin !== "string") return null;
+  if (!isPlainObject(info) || typeof info.path !== "string" || typeof info.source !== "string" || typeof info.scope !== "string" || typeof info.origin !== "string") return null;
   return `${info.path}\u0000${info.source}\u0000${info.scope}\u0000${info.origin}`;
 }
 
@@ -46,15 +48,15 @@ export class TodoProgressAdapter {
   private owner: string | null = null;
   accept(event: unknown, tools: unknown, sessionId: string, generation: number, sequence: number): PresenceUpdate | null {
     try {
-      if (!plain(event) || event.toolName !== "todo" || event.isError !== false) return null;
+      if (!isPlainObject(event) || event.toolName !== "todo" || event.isError !== false) return null;
       const currentOwner = owner(tools);
       if (!currentOwner || (this.owner !== null && currentOwner !== this.owner)) return null;
       const details = event.details;
-      if (!plain(details) || !ownData(details, DETAIL_KEYS, 5) || typeof details.action !== "string" || details.action.length > 64 || !plain(details.params) || !safeTree(details.params) || !Array.isArray(details.tasks) || details.tasks.length > MAX_TASKS || !Number.isSafeInteger(details.nextId) || (details.nextId as number) < 1 || (details.nextId as number) > Number.MAX_SAFE_INTEGER || (details.error !== undefined && !safeTree(details.error))) return null;
+      if (!isPlainObject(details) || !ownData(details, DETAIL_KEYS, 5) || typeof details.action !== "string" || details.action.length > 64 || !isPlainObject(details.params) || !safeTree(details.params) || !Array.isArray(details.tasks) || details.tasks.length > MAX_TASKS || !Number.isSafeInteger(details.nextId) || (details.nextId as number) < 1 || (details.nextId as number) > Number.MAX_SAFE_INTEGER || (details.error !== undefined && !safeTree(details.error))) return null;
       let active = 0; let completed = 0; let queued = 0; let visible = 0;
       const taskIds = new Set<number>();
       for (const rawTask of details.tasks) {
-        if (!plain(rawTask) || !ownData(rawTask, TASK_KEYS) || !Number.isSafeInteger(rawTask.id) || (rawTask.id as number) < 1 || (rawTask.id as number) > Number.MAX_SAFE_INTEGER || typeof rawTask.status !== "string" || !STATUSES.has(rawTask.status)) return null;
+        if (!isPlainObject(rawTask) || !ownData(rawTask, TASK_KEYS) || !Number.isSafeInteger(rawTask.id) || (rawTask.id as number) < 1 || (rawTask.id as number) > Number.MAX_SAFE_INTEGER || typeof rawTask.status !== "string" || !STATUSES.has(rawTask.status)) return null;
         const id = rawTask.id as number; const status = rawTask.status;
         if (taskIds.has(id)) return null;
         taskIds.add(id);

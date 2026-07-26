@@ -94,7 +94,7 @@ export function aggregateMetadata(events: readonly PresenceUpdate[]): string {
   );
   const tokens = events.reduce((sum, event) => sum + (event.usage?.tokens ?? 0), 0);
   const cost = events.reduce((sum, event) => sum + (event.usage?.cost ?? 0), 0);
-  const context = events.reduce((sum, event) => sum + (event.usage?.contextPercent ?? 0), 0);
+  const context = events.reduce((maximum, event) => Math.max(maximum, event.usage?.contextPercent ?? 0), 0);
 
   // The raw cmux block intentionally has no labels or producer-provided text.
   return [

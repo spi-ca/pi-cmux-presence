@@ -1,3 +1,4 @@
+import { isPlainObject, isProtocolToken } from "./validation.js";
 import type { PresenceConfig } from "./config.js";
 import type { CmuxIdentity } from "./identity.js";
 import {
@@ -20,23 +21,16 @@ const OPTIONAL_METHODS = new Set<V2Method>([
   "workspace.set_auto_title",
 ]);
 
-function plain(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-}
-
 function capabilities(value: unknown): Set<V2Method> {
   try {
     const allowed = ["protocol", "version", "methods", "access_mode", "socket_path"];
-    if (!plain(value)
+    if (!isPlainObject(value)
       || !Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.includes(key))
       || value.protocol !== "cmux-socket"
       || value.version !== 2
       || !Array.isArray(value.methods)
       || value.methods.length > 512
-      || !value.methods.every((method) => typeof method === "string" && method.length <= 128)) {
+      || !value.methods.every((method) => isProtocolToken(method))) {
       return new Set();
     }
 
@@ -52,14 +46,13 @@ type ResumeBinding = { kind: "pi"; source: "agent-hook"; checkpoint_id: string }
 
 function resumeBinding(value: unknown): ResumeBinding | null | undefined {
   try {
-    if (!plain(value) || !Object.hasOwn(value, "resume_binding")) return undefined;
+    if (!isPlainObject(value) || !Object.hasOwn(value, "resume_binding")) return undefined;
     const binding = value.resume_binding;
     if (binding === null) return null;
-    if (!plain(binding)
+    if (!isPlainObject(binding)
       || binding.kind !== "pi"
       || binding.source !== "agent-hook"
-      || typeof binding.checkpoint_id !== "string"
-      || !/^[A-Za-z0-9_.:-]{1,128}$/.test(binding.checkpoint_id)) {
+      || !isProtocolToken(binding.checkpoint_id)) {
       return undefined;
     }
     return { kind: "pi", source: "agent-hook", checkpoint_id: binding.checkpoint_id };
@@ -72,6 +65,7 @@ export class PresenceClient {
   private nextId = 1;
   private supported = new Set<V2Method>();
   private closed = false;
+  private closeOperation: Promise<void> | null = null;
   private ownsResumeFallback = false;
   private resumeInstallOperation: Promise<void> | null = null;
 
@@ -267,9 +261,11 @@ export class PresenceClient {
     this.ownsResumeFallback = false;
   }
 
-  async close(): Promise<void> {
+  async close(timeoutMs?: number): Promise<void> {
+    if (this.closeOperation) return this.closeOperation;
     this.closed = true;
-    await this.transport.close();
+    this.closeOperation = this.transport.close(timeoutMs);
+    await this.closeOperation;
   }
 
   private async installResumeFallbackNow(sessionId: string, command: string): Promise<void> {

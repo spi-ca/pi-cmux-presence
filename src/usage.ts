@@ -14,6 +14,7 @@ export class UsageTracker {
   private reportedCost = 0;
   private contextPercent: number | undefined;
 
+  /** Add one assistant message usage delta; repeated calls accumulate per-message values. */
   add(value: unknown): void {
     if (typeof value !== "object" || value === null) return;
     const usage = value as UsageLike;

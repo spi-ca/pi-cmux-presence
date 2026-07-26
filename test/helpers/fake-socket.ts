@@ -2,9 +2,11 @@ import * as fs from "node:fs/promises";
 import net from "node:net";
 import { dirname } from "node:path";
 
+export type FakeSocketResponse = string | undefined | { end: true };
+
 export async function fakeSocket(
   path: string,
-  handler: (line: string) => string | undefined | Promise<string | undefined>,
+  handler: (line: string) => FakeSocketResponse | Promise<FakeSocketResponse>,
 ): Promise<{ close(): Promise<void> }> {
   await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const server = net.createServer((socket) => {
@@ -15,7 +17,9 @@ export async function fakeSocket(
       const end = buffer.indexOf("\n");
       if (end < 0) return;
       const response = await handler(buffer.slice(0, end));
-      if (response !== undefined) socket.end(`${response}\n`);
+      if (response === undefined) return;
+      if (typeof response === "string") socket.end(`${response}\n`);
+      else socket.end();
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });

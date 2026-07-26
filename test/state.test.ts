@@ -86,10 +86,11 @@ describe("generic presence event state", () => {
     expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [{ id: 0, status: "pending" }] } }, tools, sessionId, 1, 5)).toBeNull();
     expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [] } }, [{ name: "todo", sourceInfo: { path: "/changed", source: "project", scope: "project", origin: "top-level" } }], sessionId, 1, 6)).toBeNull();
   });
-  test("tracks reported tokens, cost, and optional context usage", () => {
+  test("adds per-message usage deltas and tracks optional context usage", () => {
     const usage = new UsageTracker();
     usage.add({ input: 10, output: 5, cacheRead: 2, cost: { total: 0.03 } });
+    usage.add({ totalTokens: 7, cost: 0.02 });
     usage.setContext({ percent: 42 });
-    expect(usage.snapshot()).toEqual({ tokens: 17, cost: 0.03, contextPercent: 42 });
+    expect(usage.snapshot()).toEqual({ tokens: 24, cost: 0.05, contextPercent: 42 });
   });
 });
