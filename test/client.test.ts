@@ -3,7 +3,7 @@ import { PresenceClient } from "../src/client.js";
 import type { PresenceConfig } from "../src/config.js";
 
 const identity = { workspaceId: "00000000-0000-4000-8000-000000000001", surfaceId: "00000000-0000-4000-8000-000000000002" };
-const config: PresenceConfig = { enabled: true, timeoutMs: 100, maxQueue: 4, progress: true, notifications: true, flash: true, log: false, sidebar: true, nativeLifecycle: true, feed: true, metaBlock: true, autoTitle: true, resumeFallback: true, finalClearMs: 0, maxLabelChars: 96 };
+const config: PresenceConfig = { enabled: true, timeoutMs: 100, maxQueue: 4, progress: true, notifications: true, flash: true, notificationPolicy: "background", flashPolicy: "errors", subagentChildProfile: false, suppressNativeNotifications: false, suppressNativeFlash: false, log: false, sidebar: true, nativeLifecycle: true, feed: true, metaBlock: true, autoTitle: true, resumeFallback: true, finalClearMs: 0, maxLabelChars: 96 };
 
 function clientWith(responder: (request: { id: number; method: string; params: Record<string, unknown> }) => unknown, capabilityResult: unknown = { protocol: "cmux-socket", version: 2, access_mode: "automation", socket_path: "/tmp/cmux.sock", methods: ["surface.resume.get", "surface.resume.set", "surface.resume.clear", ...Array.from({ length: 252 }, (_, index) => `unrelated.method.${index}`)] }) {
   const requests: Array<{ id: number; method: string; params: Record<string, unknown> }> = [];

@@ -115,6 +115,8 @@ const ENV_KEYS = [
   "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_SOCKET_PATH", "PI_CODING_AGENT_DIR", "CMUX_PI_HOOKS_DISABLED", "HOME",
   "PI_CMUX_PRESENCE_ENABLED", "PI_CMUX_PRESENCE_TIMEOUT_MS", "PI_CMUX_PRESENCE_MAX_QUEUE",
   "PI_CMUX_PRESENCE_PROGRESS", "PI_CMUX_PRESENCE_NOTIFICATIONS", "PI_CMUX_PRESENCE_FLASH",
+  "PI_CMUX_PRESENCE_NOTIFY_POLICY", "PI_CMUX_PRESENCE_FLASH_POLICY",
+  "PI_CMUX_PROFILE", "PI_CMUX_NOTIFY_LEVEL", "PI_CMUX_SIDEBAR_FLASH", "PI_CMUX_SIDEBAR_SOURCE",
   "PI_CMUX_PRESENCE_LOG", "PI_CMUX_PRESENCE_SIDEBAR", "PI_CMUX_PRESENCE_NATIVE_LIFECYCLE",
   "PI_CMUX_PRESENCE_FEED", "PI_CMUX_PRESENCE_META_BLOCK", "PI_CMUX_PRESENCE_AUTO_TITLE",
   "PI_CMUX_PRESENCE_RESUME_FALLBACK", "PI_CMUX_PRESENCE_FINAL_CLEAR_MS", "PI_CMUX_PRESENCE_MAX_LABEL_CHARS",
@@ -134,8 +136,8 @@ function replaceEnv(values: Record<string, string>): () => void {
   };
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempts = 0; attempts < 100; attempts += 1) {
+async function waitFor(predicate: () => boolean, timeoutMs = 100): Promise<void> {
+  for (let attempts = 0; attempts < timeoutMs; attempts += 1) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
@@ -308,6 +310,465 @@ test("matching ready replays retained local state with fresh sequence and no att
   } finally { await fixture.cleanup(); }
 });
 
+test("pi-subagent terminals use a cumulative baseline, coalesce errors over successes, and flash errors only", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-policy-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, completed: number, failed: number, attention: "none" | "success" | "error") => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 7, sequence,
+      source: { id: "pi-subagent", label: "Leaky task label", kind: "agent-group" },
+      state: failed ? "error" : completed ? "success" : "idle",
+      counts: { active: 0, completed, failed }, attention,
+    });
+    update(1, 0, 0, "none"); // baseline
+    update(2, 1, 0, "success");
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    update(3, 1, 1, "error");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 완료 · 1개 실패")));
+    await new Promise<void>((resolve) => setTimeout(resolve, 800));
+
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "1개 완료 · 1개 실패" });
+    expect(JSON.stringify(notifications)).not.toContain("Leaky task label");
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("session teardown fences pending pi-subagent success timers", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-teardown-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none",
+    });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 2,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success",
+    });
+    await pi.lifecycle("session_shutdown");
+    await new Promise<void>((resolve) => setTimeout(resolve, 800));
+    expect(fixture.lines.some((line) => line.includes('"title":"Subagents 완료"'))).toBe(false);
+  } finally { await fixture.cleanup(); }
+});
+
+test("pi-subagent success merges with parent settlement without delaying other producer routing", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-settlement-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none",
+    });
+    await pi.lifecycle("agent_start");
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 2,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success",
+    });
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi 응답 준비됨"')), 700);
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.params).toMatchObject({
+      title: "Pi 응답 준비됨",
+      body: "Subagent 1개 완료",
+    });
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("an explicit agent_start inside the success grace joins the next parent settlement", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-grace-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none" });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "success", counts: { active: 0, completed: 2, failed: 0 }, attention: "success" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi 응답 준비됨"') && line.includes("Subagent 2개 완료")), 700);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("success coalescing keeps the first 450ms deadline during a sustained burst", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-success-deadline-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, completed: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: completed ? "success" : "idle", counts: { active: 0, completed, failed: 0 },
+      attention: completed ? "success" : "none",
+    });
+    update(1, 0);
+    update(2, 1);
+    // Subsequent terminals must aggregate without moving the first terminal's
+    // 450ms deadline another 450ms into the future.
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    update(3, 2);
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 완료"') && line.includes("2개 완료")), 400);
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 완료", body: "2개 완료" });
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("error coalescing keeps the first 100ms semantic deadline", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "subagent-error-deadline-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, failed: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: failed ? "error" : "idle", counts: { active: 0, completed: 0, failed },
+      attention: failed ? "error" : "none",
+    });
+    update(1, 0);
+    update(2, 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 70));
+    update(3, 2);
+    await waitFor(() => fixture.requests.some((request) => request.line.includes('"title":"Subagents 확인 필요"')));
+    const notification = fixture.requests.find((request) => request.line.includes('"title":"Subagents 확인 필요"'))!;
+    expect(notification.line).toContain("2개 실패");
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("parent settlement waits for the first error window and aggregates a second failure once", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "parent-settlement-error-window-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, failed: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: failed ? "error" : "idle", counts: { active: 0, completed: 0, failed },
+      attention: failed ? "error" : "none",
+    });
+    update(1, 0);
+    await pi.lifecycle("agent_start");
+    update(2, 1);
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+
+    update(3, 2);
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("2개 실패"))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')), 250);
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "2개 실패" });
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("generation replacement restores a parent error suppressed for a deferred child burst", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    process.env.CMUX_PI_HOOKS_DISABLED = "1";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "parent-error-generation-replacement-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (generation: number, sequence: number, failed: number, attention: "none" | "error") => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation, sequence,
+      source: { id: "pi-subagent", label: "Untrusted label", kind: "agent-group" },
+      state: failed ? "error" : "idle", counts: { active: 0, completed: 0, failed }, attention,
+    });
+    update(1, 1, 0, "none");
+    await pi.lifecycle("agent_start");
+    update(1, 2, 1, "error");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    // This replaces the still-pending <=100ms child error burst before it can
+    // dispatch, so the suppressed local parent terminal must be restored.
+    update(2, 1, 0, "none");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi"'))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+    await new Promise<void>((resolve) => setTimeout(resolve, 130));
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications.map((request) => request.params.title)).toEqual(["Pi"]);
+    expect(JSON.stringify(notifications)).not.toContain("Untrusted label");
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"'))).toBe(false);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("same-generation count reset restores a suppressed parent error once", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    process.env.CMUX_PI_HOOKS_DISABLED = "1";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "parent-error-count-reset-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, failed: number, attention: "none" | "error") => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "pi-subagent", label: "Untrusted label", kind: "agent-group" },
+      state: failed ? "error" : "idle", counts: { active: 0, completed: 0, failed }, attention,
+    });
+    update(1, 0, "none");
+    await pi.lifecycle("agent_start");
+    update(2, 1, "error");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    update(3, 0, "none");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi"'))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+    await new Promise<void>((resolve) => setTimeout(resolve, 130));
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications.map((request) => request.params.title)).toEqual(["Pi"]);
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("parent settlement preserves the local error after pending child success", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "parent-error-after-success-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none" });
+    await pi.lifecycle("agent_start");
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" });
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi"'))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications.map((request) => request.params.title)).toEqual(["Pi"]);
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("parent settlement emits an aggregate child error once", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "parent-error-after-child-error-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none" });
+    await pi.lifecycle("agent_start");
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error" });
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"'))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+    const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+      .filter((request) => request.method === "notification.create_for_surface");
+    expect(notifications.map((request) => request.params.title)).toEqual(["Subagents 확인 필요"]);
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("official hook consumes successful child bursts before unrelated terminals", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  const agentDir = await fs.mkdtemp(join(os.tmpdir(), "presence-official-burst-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  try {
+    await fs.mkdir(join(agentDir, "extensions"));
+    await fs.writeFile(join(agentDir, "extensions", "cmux-session.ts"), "cmux-pi-session-extension-marker v2");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "official-burst-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number, completed: number, failed: number, attention: "none" | "success" | "error") => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" },
+      state: failed ? "error" : completed ? "success" : "idle",
+      counts: { active: 0, completed, failed }, attention,
+    });
+    update(1, 0, 0, "none");
+    update(2, 1, 0, "success");
+    update(3, 2, 0, "success");
+    // Starting a parent inside the grace must not strand an official-hook
+    // success if that parent has not yet settled.
+    await pi.lifecycle("agent_start");
+    await new Promise<void>((resolve) => setTimeout(resolve, 800));
+    await waitFor(() => fixture.lines.filter((line) => line.includes("log --level=success") && line.includes("2개 완료")).length === 1);
+    expect(fixture.lines.filter((line) => line.includes("log --level=success"))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+
+    update(4, 2, 1, "error");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 실패")));
+    const errors = fixture.lines.filter((line) => line.includes('"title":"Subagents 확인 필요"'));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).not.toContain("2개 완료");
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await fs.rm(agentDir, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
+test("default background policy leaves local success silent but alerts local errors", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    process.env.CMUX_PI_HOOKS_DISABLED = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "local-terminal-policy-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
+    await pi.lifecycle("agent_settled");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi"'))
+      && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("reviewed child profile preserves observer output while suppressing native attention under the official hook", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  const agentDir = await fs.mkdtemp(join(os.tmpdir(), "presence-child-profile-official-"));
+  try {
+    await fs.mkdir(join(agentDir, "extensions"));
+    await fs.writeFile(join(agentDir, "extensions", "cmux-session.ts"), "cmux-pi-session-extension-marker v2");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.PI_CMUX_PROFILE = "subagent-child-v1";
+    process.env.PI_CMUX_NOTIFY_LEVEL = "disabled";
+    process.env.PI_CMUX_SIDEBAR_FLASH = "disabled";
+    process.env.PI_CMUX_SIDEBAR_SOURCE = "pi-subagent-child";
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_FLASH_POLICY = "attention";
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "child-profile-official-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: "unrelated-producer", label: "Observer", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 },
+      progress: { value: 0.5, label: "Observer progress" }, attention: "error",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.includes("Observer: running"))
+      && fixture.lines.some((line) => line.startsWith("set_progress "))
+      && fixture.lines.some((line) => line.startsWith("log --level=error")));
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.startsWith("set_agent_pid "))).toBe(false);
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    await fs.rm(agentDir, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
+test("reviewed child suppression also applies to deferred parent-error fallback", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    process.env.CMUX_PI_HOOKS_DISABLED = "1";
+    process.env.PI_CMUX_PROFILE = "subagent-child-v1";
+    process.env.PI_CMUX_NOTIFY_LEVEL = "disabled";
+    process.env.PI_CMUX_SIDEBAR_FLASH = "disabled";
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_FLASH_POLICY = "attention";
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "child-profile-fallback-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (generation: number, sequence: number, failed: number, attention: "none" | "error") => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation, sequence,
+      source: { id: "pi-subagent", label: "Untrusted", kind: "agent-group" },
+      state: failed ? "error" : "idle", counts: { active: 0, completed: 0, failed }, attention,
+    });
+    update(1, 1, 0, "none");
+    await pi.lifecycle("agent_start");
+    update(1, 2, 1, "error");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
+    await pi.lifecycle("agent_settled");
+    update(2, 1, 0, "none");
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("log --level=error") && line.includes("Pi: error")));
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("cancelled local runs publish no attention even under permissive policies", async () => {
+  const fixture = await presenceFixture(undefined, undefined, ["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    process.env.CMUX_PI_HOOKS_DISABLED = "1";
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_FLASH_POLICY = "attention";
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "cancelled-no-attention-session" } });
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "aborted" }] });
+    await pi.lifecycle("agent_settled");
+    await waitFor(() => fixture.lines.some((line) => line.includes("Pi: cancelled")));
+    expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
 test("official hook suppresses only local completion attention", async () => {
   const fixture = await presenceFixture();
   const agentDir = await fs.mkdtemp(join(os.tmpdir(), "presence-official-"));
@@ -320,11 +781,16 @@ test("official hook suppresses only local completion attention", async () => {
     const sessionId = "official-session";
     await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
     await pi.lifecycle("agent_start"); await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] }); await pi.lifecycle("agent_settled");
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 3, sequence: 1, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "idle", counts: { active: 0, completed: 0, failed: 0 }, attention: "none" });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 3, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 3, sequence: 3, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "error", counts: { active: 0, completed: 1, failed: 1 }, attention: "error" });
     pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 2, sequence: 1, source: { id: "external", label: "External", kind: "task" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" });
-    await waitFor(() => fixture.lines.some((line) => line.includes("External: success")) && fixture.lines.some((line) => line.includes('"title":"External"')));
+    await waitFor(() => fixture.lines.some((line) => line.includes("External: success")) && fixture.lines.some((line) => line.includes('"title":"External"')) && fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 완료 · 1개 실패")));
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)).filter((request) => request.method === "notification.create_for_surface");
     expect(notifications.some((request) => request.params.title === "Pi")).toBe(false);
     expect(notifications.some((request) => request.params.title === "External")).toBe(true);
+    expect(notifications.filter((request) => request.params.title === "Subagents 확인 필요")).toHaveLength(1);
+    expect(notifications.some((request) => request.params.title === "Subagents 완료")).toBe(false);
     await pi.lifecycle("session_shutdown");
   } finally { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; await fs.rm(agentDir, { recursive: true, force: true }); await fixture.cleanup(); }
 });

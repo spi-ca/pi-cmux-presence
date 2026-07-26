@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { PresenceUpdate } from "./events.js";
 import { CMUX_TEXT_BYTES } from "./protocol.js";
 import { boundedPresenceText } from "./text.js";
+import type { AttentionKind } from "./notification-policy.js";
 
 const STATUS_PREFIX = "pi-presence";
 const TODO_SOURCE = "pi-todo";
@@ -61,6 +62,62 @@ export function formatAttentionTitle(
     maxBytes: CMUX_TEXT_BYTES.notificationTitle,
     maxCodePoints,
   });
+}
+
+/** Static parent fallback for an invalidated deferred subagent error burst. */
+export function formatParentAttentionFallback(
+  attention: "info" | AttentionKind,
+  completed: number,
+  failed: number,
+  maxCodePoints: number,
+): { title: string; body: string } {
+  const parts = [`Pi: ${attention}`];
+  if (completed > 0) parts.push(`${completed} done`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return {
+    title: "Pi",
+    body: boundedPresenceText(parts.join(" · "), {
+      maxBytes: CMUX_TEXT_BYTES.notificationBody,
+      maxCodePoints,
+    }),
+  };
+}
+
+/** Static aggregate text never copies producer labels or task data. */
+export function formatSubagentAttention(
+  attention: AttentionKind,
+  completedDelta: number,
+  failedDelta: number,
+  options: { readonly parentSucceeded?: boolean; readonly timeout?: boolean },
+  maxCodePoints: number,
+): { title: string; body: string; attention: AttentionKind } {
+  const parts: string[] = [];
+  if (completedDelta > 0) parts.push(`${completedDelta}개 완료`);
+  if (failedDelta > 0) parts.push(`${failedDelta}개 실패`);
+  const summary = parts.join(" · ") || (attention === "error" ? "Subagent 작업 실패" : "Subagent 작업 완료");
+  const title = options.timeout
+    ? "Subagent 실패"
+    : options.parentSucceeded && attention === "success"
+      ? "Pi 응답 준비됨"
+      : attention === "error"
+        ? "Subagents 확인 필요"
+        : "Subagents 완료";
+  const body = options.timeout
+    ? `${summary} · Parent가 결과 처리 중`
+    : options.parentSucceeded && attention === "success" && parts.length > 0
+      ? `Subagent ${summary}`
+      : summary;
+  return {
+    title: boundedPresenceText(title, {
+      maxBytes: CMUX_TEXT_BYTES.notificationTitle,
+      maxCodePoints,
+    }),
+    body: boundedPresenceText(body, {
+      maxBytes: CMUX_TEXT_BYTES.notificationBody,
+      maxCodePoints,
+    }),
+    attention,
+  };
 }
 
 export function formatAutoTitle(name: string, maxCodePoints: number): string {

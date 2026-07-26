@@ -13,11 +13,23 @@ import {
 import { readCmuxIdentity, resolveCmuxSocketPath } from "./identity.js";
 import { officialHookDetected } from "./official-hook.js";
 import {
+  PI_SUBAGENT_SOURCE_ID,
+  fixedCoalescingDeadline,
+  observeSubagentTerminal,
+  remainingErrorDeadlineMs,
+  shouldFlashAttention,
+  shouldNotifyAttention,
+  type AttentionKind,
+  type SubagentTerminalBaseline,
+} from "./notification-policy.js";
+import {
   aggregateMetadata,
   attentionLevel,
   deriveTerminalState,
   formatAttentionTitle,
   formatAutoTitle,
+  formatParentAttentionFallback,
+  formatSubagentAttention,
   formatProgressText,
   formatStateText,
   PRESENCE_STATE_STYLES,
@@ -34,12 +46,49 @@ const TODO_SOURCE = "pi-todo";
 type ContextProvider = { getContextUsage?: () => unknown };
 type TerminalState = "success" | "error" | "cancelled";
 type ToolFeedEvent = { toolCallId?: unknown; toolName?: unknown };
+type OfficialHookDetector = () => Promise<boolean>;
+
+type RuntimeClock = {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+};
+
+/** Production uses a monotonic clock; tests can inject a deterministic scheduler. */
+const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
 type DetachedSession = {
   client: PresenceClient | null;
   sessionId: string | null;
   officialHook: boolean;
   statusScope: string | undefined;
   retainedEvents: PresenceUpdate[];
+};
+
+type PendingSubagentAttention = {
+  generation: number;
+  completedDelta: number;
+  failedDelta: number;
+  terminal: AttentionKind;
+  /** Parent run that can settle this burst; zero means independent. */
+  parentRun: number;
+  /** Fixed semantic burst deadline: first success + 450ms or first error + 100ms. */
+  coalesceDeadline: number | null;
+  /** First-error + 10s active-parent maximum wait deadline. */
+  errorDeadline: number | null;
+  /** Terminal outcome recorded when the parent settles during this burst. */
+  parentSettled: TerminalState | null;
+};
+
+type SuppressedParentAttention = {
+  readonly parentRun: number;
+  readonly attention: "info" | AttentionKind;
+  readonly completed: number;
+  readonly failed: number;
 };
 
 function shellQuote(value: string): string {
@@ -78,12 +127,24 @@ export class PresenceRuntime {
   private hadToolError = false;
   private shownProgress = false;
   private clearTimer: ReturnType<typeof setTimeout> | undefined;
+  private subagentBaseline: SubagentTerminalBaseline | null = null;
+  private subagentPending: PendingSubagentAttention | null = null;
+  private subagentTimer: ReturnType<typeof setTimeout> | undefined;
+  private subagentTimerEpoch = 0;
+  private parentRunRevision = 0;
+  /** Suppresses a terminal after its child error already timed out at 10 seconds. */
+  private fencedParentRun: number | null = null;
+  private suppressParentAttentionOnce = false;
+  /** A trusted local terminal held only while its child error burst is pending. */
+  private suppressedParentAttention: SuppressedParentAttention | null = null;
   private officialHook = false;
   private statusScope: string | undefined;
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly config: PresenceConfig,
+    private readonly clock: RuntimeClock = SYSTEM_RUNTIME_CLOCK,
+    private readonly detectOfficialHook: OfficialHookDetector = officialHookDetected,
   ) {}
 
   handlePresenceUpdate(payload: unknown): void {
@@ -137,8 +198,9 @@ export class PresenceRuntime {
     if (epoch !== this.sessionEpoch || nextSessionId === null) return;
 
     this.beginSession(nextSessionId, context);
-    this.officialHook = await officialHookDetected();
+    const detectedOfficialHook = await this.detectOfficialHook();
     if (!this.isCurrent(epoch, nextSessionId)) return;
+    this.officialHook = detectedOfficialHook;
 
     const identity = readCmuxIdentity();
     this.statusScope = identity?.surfaceId;
@@ -180,6 +242,9 @@ export class PresenceRuntime {
     this.cancelFinalClear();
     if (!this.active) {
       this.active = true;
+      this.parentRunRevision += 1;
+      // A timeout fence belongs only to its original parent run.
+      if (this.fencedParentRun !== this.parentRunRevision) this.fencedParentRun = null;
       this.usage = new UsageTracker();
       this.hadToolError = false;
     }
@@ -293,7 +358,12 @@ export class PresenceRuntime {
       ? "error"
       : this.terminal === "success"
         ? "success"
-        : "info";
+        : "none";
+    // A cancelled local run is status-only: it must not publish an attention
+    // event even under permissive notification or flash policies.
+    this.suppressParentAttentionOnce = attention === "none"
+      ? false
+      : this.flushSubagentForParentSettlement(attention);
     this.publish(this.terminal, attention);
     this.scheduleFinalClear(this.sessionEpoch);
 
@@ -318,6 +388,9 @@ export class PresenceRuntime {
     this.terminal = "success";
     this.hadToolError = false;
     this.shownProgress = false;
+    this.resetSubagentNotifications();
+    this.parentRunRevision = 0;
+    this.fencedParentRun = null;
     this.officialHook = false;
     this.statusScope = undefined;
   }
@@ -347,6 +420,10 @@ export class PresenceRuntime {
     this.terminal = "success";
     this.hadToolError = false;
     this.shownProgress = false;
+    this.resetSubagentNotifications();
+    this.parentRunRevision = 0;
+    this.fencedParentRun = null;
+    this.suppressParentAttentionOnce = false;
     this.officialHook = false;
     this.statusScope = undefined;
   }
@@ -394,19 +471,301 @@ export class PresenceRuntime {
     );
     this.renderProgress();
 
-    const level = attentionLevel(event.attention);
-    // Official hooks already own local completion attention. Other producers remain useful.
-    if (level && !(this.officialHook && event.source.id === LOCAL_SOURCE.id)) {
-      void this.client?.log(level, label);
-      void this.client?.notify(
-        formatAttentionTitle(event, this.config.maxLabelChars),
-        label,
-      );
-      void this.client?.flash();
+    if (event.source.id === PI_SUBAGENT_SOURCE_ID) {
+      this.observeSubagentAttention(event);
+    } else {
+      const level = attentionLevel(event.attention);
+      const suppressParentAttention = event.source.id === LOCAL_SOURCE.id && this.suppressParentAttentionOnce;
+      if (suppressParentAttention) this.suppressParentAttentionOnce = false;
+      // Official hooks already own local completion attention. Generic producers
+      // remain immediate, but both native effects obey the global policies.
+      if (level && !suppressParentAttention && !(this.officialHook && event.source.id === LOCAL_SOURCE.id)) {
+        void this.client?.log(level, label);
+        if (!this.config.suppressNativeNotifications && shouldNotifyAttention(
+          this.config.notificationPolicy,
+          this.config.notifications,
+          event.attention,
+          event.source.id === LOCAL_SOURCE.id ? "local" : "external",
+        )) {
+          void this.client?.notify(formatAttentionTitle(event, this.config.maxLabelChars), label);
+        }
+        if (!this.config.suppressNativeFlash && shouldFlashAttention(
+          this.config.flashPolicy,
+          this.config.flash,
+          this.config.notificationPolicy,
+          event.attention,
+          event.source.id === LOCAL_SOURCE.id ? "local" : "external",
+        )) {
+          void this.client?.flash();
+        }
+      }
     }
     if (!this.officialHook && this.config.metaBlock) {
       void this.client?.meta(this.metadata());
     }
+  }
+
+  /** The pi-subagent producer is cumulative and gets the only aggregate path. */
+  private observeSubagentAttention(event: PresenceUpdate): void {
+    const observation = observeSubagentTerminal(this.subagentBaseline, event);
+    this.subagentBaseline = observation.baseline;
+    if (observation.reset || observation.generationChanged) {
+      const invalidated = this.subagentPending;
+      this.clearSubagentTimer();
+      this.subagentPending = null;
+      // A deferred aggregate owns the local terminal only while that exact
+      // cumulative producer generation remains valid.
+      if (invalidated && invalidated.parentSettled !== null) {
+        this.dispatchSuppressedParentAttention(invalidated.parentRun);
+      }
+    }
+    if (!observation.terminal) return;
+
+    const existing = this.subagentPending;
+    const sameAggregate = existing?.generation === event.generation;
+    const priorTerminal = sameAggregate ? existing.terminal : null;
+    const pending: PendingSubagentAttention = sameAggregate
+      ? {
+        ...existing,
+        completedDelta: existing.completedDelta + observation.completedDelta,
+        failedDelta: existing.failedDelta + observation.failedDelta,
+        terminal: observation.terminal === "error" ? "error" : existing.terminal,
+      }
+      : {
+        generation: event.generation,
+        completedDelta: observation.completedDelta,
+        failedDelta: observation.failedDelta,
+        terminal: observation.terminal,
+        // Success gets a short next-parent grace; an independent error never
+        // becomes owned merely because a parent starts during its 100ms window.
+        parentRun: this.active ? this.parentRunRevision : observation.terminal === "success" ? this.parentRunRevision + 1 : 0,
+        coalesceDeadline: null,
+        errorDeadline: null,
+        parentSettled: null,
+      };
+    this.subagentPending = pending;
+
+    const now = this.clock.now();
+    // Closed windows are deliberately not extended. The next terminal starts
+    // its own fixed semantic window while its counts remain in this parent
+    // aggregate for a single eventual settlement notification.
+    const errorSupersedesSuccess = observation.terminal === "error" && priorTerminal === "success";
+    // An inactive success temporarily reserves the next parent run. If its
+    // burst turns into an error before that parent exists, the error is
+    // independent: a later start during its short window cannot add 10s wait.
+    if (errorSupersedesSuccess
+      && !this.active
+      && pending.parentRun === this.parentRunRevision + 1
+      && pending.parentSettled === null) {
+      pending.parentRun = 0;
+      pending.errorDeadline = null;
+    }
+    if (pending.coalesceDeadline === null || errorSupersedesSuccess) {
+      pending.coalesceDeadline = fixedCoalescingDeadline(
+        null,
+        now,
+        observation.terminal === "error" ? 100 : 450,
+      );
+    }
+    if (observation.terminal === "error" && pending.parentRun !== 0 && pending.errorDeadline === null) {
+      pending.errorDeadline = now + 10_000;
+    }
+    this.scheduleSubagentTimer(
+      remainingErrorDeadlineMs(pending.coalesceDeadline, now),
+      pending.generation,
+      pending.parentRun,
+      () => this.finishSubagentCoalescing(pending.generation, pending.parentRun),
+    );
+  }
+
+  private finishSubagentCoalescing(generation: number, parentRun: number): void {
+    const pending = this.subagentPending;
+    if (!pending || pending.generation !== generation || pending.parentRun !== parentRun) return;
+    const now = this.clock.now();
+    const remainingBurst = remainingErrorDeadlineMs(pending.coalesceDeadline ?? now, now);
+    if (remainingBurst > 0) {
+      this.scheduleSubagentTimer(remainingBurst, generation, parentRun, () => {
+        this.finishSubagentCoalescing(generation, parentRun);
+      });
+      return;
+    }
+    pending.coalesceDeadline = null;
+
+    // Settlement inside a window is intentionally deferred until the fixed
+    // window closes, so same-burst terminals cannot split native attention.
+    if (pending.parentSettled !== null) {
+      this.dispatchSubagentAttention(generation, {
+        parentSucceeded: pending.terminal === "success" && pending.parentSettled === "success",
+      });
+      return;
+    }
+    // An unclaimed success grace, an independent error, or a superseded parent
+    // cannot wait for a future run.
+    if (parentRun === 0 || !this.active || parentRun !== this.parentRunRevision) {
+      this.dispatchSubagentAttention(generation, { parentSucceeded: false });
+      return;
+    }
+    if (pending.terminal === "success") {
+      // Official hooks retain their prior log-only successful child behavior.
+      if (this.officialHook) this.dispatchSubagentAttention(generation, { parentSucceeded: false });
+      return;
+    }
+
+    const remainingErrorWait = remainingErrorDeadlineMs(pending.errorDeadline ?? now, now);
+    if (remainingErrorWait === 0) {
+      this.dispatchSubagentAttention(generation, { timeout: true });
+      return;
+    }
+    this.scheduleSubagentTimer(remainingErrorWait, generation, parentRun, () => {
+      const current = this.subagentPending;
+      if (!current
+        || current.terminal !== "error"
+        || !this.active
+        || current.parentRun !== this.parentRunRevision) return;
+      this.dispatchSubagentAttention(generation, { timeout: true });
+    });
+  }
+
+  /** A real parent settlement resolves only the aggregate bound to that run. */
+  private flushSubagentForParentSettlement(attention: "info" | AttentionKind): boolean {
+    if (this.fencedParentRun === this.parentRunRevision) return true;
+    const pending = this.subagentPending;
+    if (!pending || pending.parentRun !== this.parentRunRevision) return false;
+    pending.parentSettled = this.terminal;
+    if (pending.terminal === "success" && this.terminal === "error") {
+      // A successful child aggregate must never hide the parent's local error.
+      this.clearSubagentTimer();
+      this.subagentPending = null;
+      return false;
+    }
+    if (pending.coalesceDeadline !== null
+      && remainingErrorDeadlineMs(pending.coalesceDeadline, this.clock.now()) > 0) {
+      this.suppressedParentAttention = {
+        parentRun: pending.parentRun,
+        attention,
+        completed: this.completed,
+        failed: this.failed,
+      };
+      return true;
+    }
+    this.dispatchSubagentAttention(pending.generation, {
+      parentSucceeded: pending.terminal === "success" && pending.parentSettled === "success",
+    });
+    return true;
+  }
+
+  private dispatchSubagentAttention(
+    generation: number,
+    options: { readonly parentSucceeded?: boolean; readonly timeout?: boolean },
+  ): void {
+    const pending = this.subagentPending;
+    if (!pending || pending.generation !== generation) return;
+    if (options.timeout && pending.parentRun !== 0) this.fencedParentRun = pending.parentRun;
+    this.clearSubagentTimer();
+    this.subagentPending = null;
+    if (this.suppressedParentAttention?.parentRun === pending.parentRun) {
+      this.suppressedParentAttention = null;
+    }
+
+    const content = formatSubagentAttention(
+      pending.terminal,
+      pending.completedDelta,
+      pending.failedDelta,
+      options,
+      this.config.maxLabelChars,
+    );
+    const attention: PresenceUpdate["attention"] = content.attention;
+    void this.client?.log(attention, content.body);
+    // An official Pi hook suppresses only successful pi-subagent native alerts.
+    if (!this.config.suppressNativeNotifications
+      && !(this.officialHook && attention === "success") && shouldNotifyAttention(
+      this.config.notificationPolicy,
+      this.config.notifications,
+      attention,
+      "external",
+      options.parentSucceeded === true,
+    )) {
+      void this.client?.notify(content.title, content.body);
+    }
+    if (!this.config.suppressNativeFlash
+      && !(this.officialHook && attention === "success") && shouldFlashAttention(
+      this.config.flashPolicy,
+      this.config.flash,
+      this.config.notificationPolicy,
+      attention,
+      "external",
+      options.parentSucceeded === true,
+    )) {
+      void this.client?.flash();
+    }
+  }
+
+  private dispatchSuppressedParentAttention(parentRun: number): void {
+    const fallback = this.suppressedParentAttention;
+    if (!fallback || fallback.parentRun !== parentRun) return;
+    this.suppressedParentAttention = null;
+    // The fallback is intentionally constructed from fixed local wording and
+    // bounded parent counters, never the invalidating producer event.
+    const content = formatParentAttentionFallback(
+      fallback.attention,
+      fallback.completed,
+      fallback.failed,
+      this.config.maxLabelChars,
+    );
+    if (this.officialHook) return;
+    void this.client?.log(fallback.attention, content.body);
+    if (!this.config.suppressNativeNotifications && shouldNotifyAttention(
+      this.config.notificationPolicy,
+      this.config.notifications,
+      fallback.attention,
+      "local",
+    )) {
+      void this.client?.notify(content.title, content.body);
+    }
+    if (!this.config.suppressNativeFlash && shouldFlashAttention(
+      this.config.flashPolicy,
+      this.config.flash,
+      this.config.notificationPolicy,
+      fallback.attention,
+      "local",
+    )) {
+      void this.client?.flash();
+    }
+  }
+
+  private scheduleSubagentTimer(
+    delayMs: number,
+    generation: number,
+    parentRun: number,
+    callback: () => void,
+  ): void {
+    this.clearSubagentTimer();
+    const timerEpoch = ++this.subagentTimerEpoch;
+    const sessionEpoch = this.sessionEpoch;
+    this.subagentTimer = this.clock.setTimeout(() => {
+      // Timers are observer-only: every mutable identity is fenced before a
+      // callback can route a notification after replacement or teardown.
+      if (timerEpoch !== this.subagentTimerEpoch
+        || sessionEpoch !== this.sessionEpoch
+        || this.subagentPending?.generation !== generation
+        || this.subagentPending?.parentRun !== parentRun) return;
+      this.subagentTimer = undefined;
+      callback();
+    }, Math.max(0, delayMs));
+    this.subagentTimer.unref?.();
+  }
+
+  private clearSubagentTimer(): void {
+    if (this.subagentTimer) this.clock.clearTimeout(this.subagentTimer);
+    this.subagentTimer = undefined;
+    this.subagentTimerEpoch += 1;
+  }
+
+  private resetSubagentNotifications(): void {
+    this.clearSubagentTimer();
+    this.subagentPending = null;
+    this.subagentBaseline = null;
+    this.suppressedParentAttention = null;
   }
 
   private renderProgress(): void {
@@ -498,7 +857,7 @@ export class PresenceRuntime {
 
   private scheduleFinalClear(epoch: number): void {
     this.cancelFinalClear();
-    this.clearTimer = setTimeout(() => {
+    this.clearTimer = this.clock.setTimeout(() => {
       if (epoch === this.sessionEpoch && !this.active) {
         void this.client?.clearStatus(this.statusKey(LOCAL_SOURCE.id));
       }
@@ -507,7 +866,7 @@ export class PresenceRuntime {
   }
 
   private cancelFinalClear(): void {
-    if (this.clearTimer) clearTimeout(this.clearTimer);
+    if (this.clearTimer) this.clock.clearTimeout(this.clearTimer);
     this.clearTimer = undefined;
   }
 
