@@ -153,6 +153,9 @@ class ManualRuntimeClock {
   clearTimeout = (timer: ReturnType<typeof setTimeout>) => {
     (timer as unknown as { cleared: boolean }).cleared = true;
   };
+  elapseWithoutRunningTimers(ms: number): void {
+    this.nowMs += ms;
+  }
   advance(ms: number): void {
     const target = this.nowMs + ms;
     while (true) {
@@ -211,11 +214,11 @@ test("three successful child deltas form one count-aware burst; cancellations st
     runtime.handlePresenceUpdate(producerUpdate(sessionId, 5, { state: "success", counts: { active: 0, completed: 3, failed: 0, cancelled: 1 }, attention: "success" }));
     await waitFor(() => notifications(socket.lines).length === 1, 700);
 
-    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents 완료", body: "3개 완료" });
-    expect(notifications(socket.lines)[0]?.params.body).not.toContain("취소");
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents completed", body: "3 completed" });
+    expect(notifications(socket.lines)[0]?.params.body).not.toContain("cancelled");
     runtime.handlePresenceUpdate(producerUpdate(sessionId, 6, { state: "success", counts: { active: 0, completed: 4, failed: 0, cancelled: 1 }, attention: "success" }));
     await waitFor(() => notifications(socket.lines).length === 2, 700);
-    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Subagents 완료", body: "1개 완료" });
+    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Subagents completed", body: "1 completed" });
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -243,7 +246,7 @@ test("a running parent holds three successful child deltas until settlement and 
     runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] });
     runtime.handleAgentSettled({ isIdle: () => true });
     await waitFor(() => notifications(socket.lines).length === 1);
-    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi 응답 준비됨", body: "Subagent 3개 완료" });
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi response ready", body: "Subagents: 3 completed" });
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -270,11 +273,51 @@ test("active-parent error max-wait is deterministic and dispatches exactly one s
       && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
 
     expect(notifications(socket.lines)[0]?.params).toMatchObject({
-      title: "Subagent 실패",
-      body: "1개 실패 · Parent가 결과 처리 중",
+      title: "Subagent failed",
+      body: "1 failed · Parent is processing results",
     });
     expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
     expect(clock.timers.every((timer) => timer.cleared || timer.unrefCalled)).toBe(true);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("a later active-parent error window cannot extend the first error's 10-second cap", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "late-window-error-cap-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    }));
+    clock.advance(9_999);
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 3, {
+      state: "error", counts: { active: 0, completed: 0, failed: 2 }, attention: "error",
+    }));
+    expect(notifications(socket.lines)).toEqual([]);
+
+    clock.advance(1);
+    await waitFor(() => notifications(socket.lines).length === 1
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+    expect(clock.nowMs).toBe(10_000);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({
+      title: "Subagent failed",
+      body: "2 failed · Parent is processing results",
+    });
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+
+    runtime.handleAgentEnd({ messages: [{ stopReason: "error" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(1);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -305,7 +348,7 @@ test("active-parent success and error windows close on schedule and settlement m
     expect(notifications(socket.lines)).toEqual([]);
     clock.advance(1);
     await waitFor(() => notifications(socket.lines).length === 1);
-    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi 응답 준비됨", body: "Subagent 2개 완료" });
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi response ready", body: "Subagents: 2 completed" });
 
     runtime.handleAgentStart();
     runtime.handlePresenceUpdate(producerUpdate(sessionId, 4, {
@@ -321,7 +364,36 @@ test("active-parent success and error windows close on schedule and settlement m
     expect(notifications(socket.lines)).toHaveLength(1);
     clock.advance(1);
     await waitFor(() => notifications(socket.lines).length === 2);
-    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "2개 실패" });
+    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Subagents need attention", body: "2 failed" });
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("an expired inactive success grace dispatches before a new parent can claim it", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "expired-inactive-success-grace-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success",
+    }));
+    clock.elapseWithoutRunningTimers(450);
+
+    runtime.handleAgentStart();
+    await waitFor(() => notifications(socket.lines).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents completed", body: "1 completed" });
+    expect(notifications(socket.lines)[0]?.params.title).not.toBe("Pi response ready");
+
+    // The callback queued for the expired grace is fenced by the dispatch.
+    clock.advance(0);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(1);
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -344,7 +416,7 @@ test("an independent error remains independent when a parent starts inside its 1
     runtime.handleAgentStart();
     clock.advance(50);
     await waitFor(() => notifications(socket.lines).length === 1);
-    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "1개 실패" });
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents need attention", body: "1 failed" });
     expect(clock.nowMs).toBe(100);
     await runtime.shutdownSession();
   } finally {
@@ -376,11 +448,11 @@ test("an inactive error superseding pending success remains independent through 
 
     expect(clock.nowMs).toBe(125);
     expect(notifications(socket.lines)[0]?.params).toMatchObject({
-      title: "Subagents 확인 필요",
-      body: "1개 완료 · 1개 실패",
+      title: "Subagents need attention",
+      body: "1 completed · 1 failed",
     });
     expect(JSON.stringify(notifications(socket.lines)[0]?.params)).not.toContain("Parent");
-    expect(notifications(socket.lines)[0]?.params.title).not.toBe("Pi 응답 준비됨");
+    expect(notifications(socket.lines)[0]?.params.title).not.toBe("Pi response ready");
 
     // The independent error must not create the active parent's 10-second
     // timeout fence, so its later terminal remains visible.
@@ -390,6 +462,53 @@ test("an inactive error superseding pending success remains independent through 
     runtime.handleAgentSettled({ isIdle: () => true });
     await waitFor(() => notifications(socket.lines).length === 2);
     expect(notifications(socket.lines)[1]?.params.title).toBe("Pi");
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("an elapsed error hard cap fences before a later terminal can merge", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "elapsed-error-hard-cap-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    }));
+    clock.elapseWithoutRunningTimers(10_000);
+
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 3, {
+      state: "error", counts: { active: 0, completed: 0, failed: 2 }, attention: "error",
+    }));
+    await waitFor(() => notifications(socket.lines).length === 1
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({
+      title: "Subagent failed",
+      body: "1 failed · Parent is processing results",
+    });
+
+    runtime.handleAgentEnd({ messages: [{ stopReason: "error" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    clock.advance(100);
+    await waitFor(() => notifications(socket.lines).length === 2
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 2);
+    expect(notifications(socket.lines).map((notification) => notification.params)).toEqual([
+      expect.objectContaining({ title: "Subagent failed", body: "1 failed · Parent is processing results" }),
+      expect.objectContaining({ title: "Subagents need attention", body: "1 failed" }),
+    ]);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(2);
+
+    // Both the original hard-cap callback and the later aggregate timer are fenced.
+    clock.advance(10_000);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(2);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(2);
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -426,6 +545,147 @@ test("an error max-wait fence suppresses only its own later parent settlement", 
     await waitFor(() => notifications(socket.lines).length === 2
       && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 2);
     expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(2);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("a cancelled parent reconciles a closed child success without carrying it into the next run", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "cancelled-parent-success-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success",
+    }));
+    clock.advance(450);
+
+    runtime.handleAgentEnd({ messages: [{ stopReason: "aborted" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await waitFor(() => notifications(socket.lines).length === 1
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents completed", body: "1 completed" });
+
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 3, {
+      state: "success", counts: { active: 0, completed: 2, failed: 0 }, attention: "success",
+    }));
+    clock.advance(450);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await waitFor(() => notifications(socket.lines).length === 2
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 2);
+    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Pi response ready", body: "Subagents: 1 completed" });
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(2);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("a cancelled parent dispatches a closed child error once without a timeout duplicate", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "cancelled-parent-error-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    }));
+    clock.advance(100);
+
+    runtime.handleAgentEnd({ messages: [{ stopReason: "aborted" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await waitFor(() => notifications(socket.lines).length === 1
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Subagents need attention", body: "1 failed" });
+    clock.advance(10_000);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(1);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("a later child error after a timeout fence settles independently while the parent error stays suppressed", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "fenced-later-child-error-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    }));
+    clock.advance(10_000);
+    await waitFor(() => notifications(socket.lines).length === 1
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 3, {
+      state: "error", counts: { active: 0, completed: 0, failed: 2 }, attention: "error",
+    }));
+    runtime.handleAgentEnd({ messages: [{ stopReason: "error" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    clock.advance(100);
+    await waitFor(() => notifications(socket.lines).length === 2
+      && socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 2);
+    expect(notifications(socket.lines).map((notification) => notification.params)).toEqual([
+      expect.objectContaining({ title: "Subagent failed", body: "1 failed · Parent is processing results" }),
+      expect.objectContaining({ title: "Subagents need attention", body: "1 failed" }),
+    ]);
+    clock.advance(10_000);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(2);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(2);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("a settled open aggregate dispatches at the next parent boundary instead of merging runs", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+    const sessionId = "settled-open-boundary-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 1));
+    runtime.handleAgentStart();
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 2, {
+      state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success",
+    }));
+    clock.advance(100);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+
+    runtime.handleAgentStart();
+    await waitFor(() => notifications(socket.lines).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi response ready", body: "Subagents: 1 completed" });
+    runtime.handlePresenceUpdate(producerUpdate(sessionId, 3, {
+      state: "success", counts: { active: 0, completed: 2, failed: 0 }, attention: "success",
+    }));
+    clock.advance(450);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await waitFor(() => notifications(socket.lines).length === 2);
+    expect(notifications(socket.lines)[1]?.params).toMatchObject({ title: "Pi response ready", body: "Subagents: 1 completed" });
     await runtime.shutdownSession();
   } finally {
     await socket.cleanup();
@@ -599,6 +859,50 @@ test("notification RPC failure has no unhandled rejection and does not block sta
     expect(socket.lines).toContain(`clear_status ${presenceStatusKey("external-rpc-failure", socket.surfaceId)} --tab=${socket.workspaceId}`);
   } finally {
     process.off("unhandledRejection", listener);
+    await socket.cleanup();
+  }
+});
+
+test("local terminal wording is static, settles once after idle, and clears its sidebar status on schedule", async () => {
+  const socket = await fixture(["notification.create_for_surface"]);
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, {
+      ...resolvePresenceConfig(),
+      finalClearMs: 25,
+    }, clock);
+    const sessionId = "canonical-local-session";
+    const canaries = ["ASSISTANT_BODY_CANARY", "PROMPT_CANARY", "RAW_ERROR_CANARY", "/private/PATH_CANARY", "TOOL_OUTPUT_CANARY"];
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handleAgentStart();
+    runtime.handleMessageEnd({ message: {
+      role: "assistant",
+      content: "ASSISTANT_BODY_CANARY",
+      preview: "PROMPT_CANARY",
+      error: "RAW_ERROR_CANARY",
+      path: "/private/PATH_CANARY",
+      toolOutput: "TOOL_OUTPUT_CANARY",
+    } });
+    runtime.handleAgentEnd({ messages: [{ stopReason: "error", error: "RAW_ERROR_CANARY" }] });
+    runtime.handleAgentSettled({ isIdle: () => false });
+    expect(notifications(socket.lines)).toEqual([]);
+
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await waitFor(() => notifications(socket.lines).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi", body: "Needs attention" });
+    runtime.handleAgentSettled({ isIdle: () => true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(1);
+    for (const canary of canaries) expect(socket.lines.join("\n")).not.toContain(canary);
+
+    const localKey = presenceStatusKey("pi", socket.surfaceId);
+    clock.advance(24);
+    expect(socket.lines).not.toContain(`clear_status ${localKey} --tab=${socket.workspaceId}`);
+    clock.advance(1);
+    await waitFor(() => socket.lines.includes(`clear_status ${localKey} --tab=${socket.workspaceId}`));
+    await runtime.shutdownSession();
+  } finally {
     await socket.cleanup();
   }
 });

@@ -12,7 +12,7 @@
 | `PI_CMUX_PRESENCE_PROGRESS` | `true` | boolean, V1 progress set/clear 소유. `false`이면 초기화·종료 clear를 포함해 progress를 전혀 변경하지 않음 |
 | `PI_CMUX_PRESENCE_NOTIFICATIONS` | `true` | boolean, notification의 레거시 전역 kill switch. `false`이면 policy와 관계없이 V2 notification을 보내지 않음 |
 | `PI_CMUX_PRESENCE_FLASH` | `true` | boolean, flash의 레거시 전역 kill switch. `false`이면 policy와 관계없이 V2 flash를 보내지 않음 |
-| `PI_CMUX_PRESENCE_NOTIFY_POLICY` | `background` | enum: `errors`/`background`/`all`/`disabled`, V2 notification 대상 정책 |
+| `PI_CMUX_PRESENCE_NOTIFY_POLICY` | `background` | enum: `errors`/`background`/`settled`/`all`/`disabled`, V2 notification 대상 정책 |
 | `PI_CMUX_PRESENCE_FLASH_POLICY` | `errors` | enum: `errors`/`attention`/`disabled`, V2 flash 대상 정책 |
 | `PI_CMUX_PRESENCE_LOG` | `false` | boolean, V1 attention log |
 | `PI_CMUX_PRESENCE_SIDEBAR` | `true` | boolean, V1 status 쓰기 |
@@ -34,18 +34,21 @@ notification 정책은 다음과 같습니다.
 
 - `errors`: `attention: "error"`만 알립니다.
 - `background`(기본): 일반 외부 producer의 non-`none` attention과 error를 알리되, 내장 Pi의 단독 성공은 알리지 않습니다. 부모 성공과 `pi-subagent` 성공 집계가 실제 settlement에서 합쳐진 경우만 내장 성공으로 알릴 수 있습니다.
+- `settled`: 정확히 settle된 local Pi 성공·error와 외부 error만 알립니다. 외부 `info`·`success`는 알리지 않습니다. 즉 local success/error는 yes, external info/success는 no, external error는 yes입니다.
 - `all`: 모든 non-`none` attention을 알립니다.
 - `disabled`: notification을 만들지 않습니다.
 
-여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지에는 신뢰할 수 있는 read-only focus capability가 없으므로 focus 기반 suppress는 지원하지 않습니다.
+기본값은 계속 `background`이며 `settled`는 명시 opt-in입니다. 여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지는 focus polling을 하지 않고 신뢰할 수 있는 read-only focus capability도 사용하지 않습니다. focused surface의 banner를 보일지 억제할지는 cmux가 소유합니다.
 
 flash 정책은 다음과 같습니다.
+
+native notification/flash의 precedence는 다음과 같습니다. 공식 cmux hook이 우선하는 local completion은 이 패키지가 보내지 않으며, 검토한 child profile의 해당 channel suppression도 그 channel을 막습니다. 그 외에는 레거시 `false` kill switch가 policy보다 먼저 막고, policy가 허용한 경우에도 cmux가 해당 정확한 V2 capability를 광고해야만 전송합니다.
 
 - `errors`(기본): error만 flash합니다. notification 정책이 `disabled`여도 error flash는 독립적으로 가능하며, 성공은 기본 flash하지 않습니다.
 - `attention`: 위 notification 정책의 attention 대상과 같은 경우 flash합니다.
 - `disabled`: flash하지 않습니다.
 
-notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 정확한 `pi-subagent`의 terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. 활성 부모 error는 최초 error부터 10초 후 한 번 dispatch하며 그 부모 run의 뒤늦은 settlement만 fence합니다. 비활성 success grace가 닫히기 전에 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. 취소와 ready replay(`attention: "none"`)는 attention을 만들지 않습니다.
+notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 정확한 `pi-subagent`의 terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 현재 같은 종류 window를 연장하지 않지만, window가 닫힌 뒤에는 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. 활성 부모 error는 settlement를 기다리되 최초 error부터 최대 10초 후 한 번 dispatch하며, timeout만 그 부모 run의 뒤늦은 settlement를 fence합니다. 비활성 success grace가 닫히기 전에 부모가 아직 비활성인 동안 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. 취소와 ready replay(`attention: "none"`)는 attention을 만들지 않습니다.
 
 ### 검토한 외부 cmux child profile
 
@@ -81,6 +84,20 @@ resume fallback은 `surface.resume.get`으로 기존 binding을 먼저 읽습니
 V1 상태·progress·log와 V2 notification body의 text 한도는 512 UTF-8 bytes이고 V2 notification title과 workspace auto-title은 128 UTF-8 bytes입니다. label은 control/bidi 문자를 공백으로 정규화하고 whitespace를 접은 뒤, `PI_CMUX_PRESENCE_MAX_LABEL_CHARS`와 목적지 byte 한도를 모두 만족하도록 완전한 Unicode code point 단위로 축약합니다. 축약 표시 `…`의 byte와 code point도 한도에 포함합니다. auto-title의 session name은 추가로 `Math.min(80, PI_CMUX_PRESENCE_MAX_LABEL_CHARS)` code point까지만 축약합니다.
 
 host session ID는 process-local 이벤트와 동일하게 control/bidi 문자가 없는 1–96 Unicode code points의 safe text여야 합니다. 누락·조회 오류·범위 위반이면 새 cmux client나 ready/update를 만들지 않고 해당 presence 세션을 비활성화하며, 이전 세션에서 소유한 status/progress/lifecycle/resume 출력은 직렬 teardown으로 정리합니다.
+
+## local Pi 표시와 notification 보존
+
+내장 Pi source의 sidebar와 native notification은 assistant response body·preview, user prompt, raw error, path, tool argument 또는 tool output을 조합하지 않는 고정 문구만 사용합니다.
+
+| 상태 | sidebar | notification title | notification body |
+| --- | --- | --- | --- |
+| `idle` / `waiting` | `Pi · Waiting` | `Pi` | `Waiting` |
+| `running` | `Pi · Writing response` | `Pi` | `Writing response` |
+| `success` | `Pi · Response ready` | `Pi` | `Response ready` |
+| `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
+| `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
+
+local terminal은 `agent_end`만으로 확정하지 않고 idle인 `agent_settled`에서만 최종 publish합니다. host가 `agent_settled` hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
 ## identity·소켓과 공식 hook 우선순위
 

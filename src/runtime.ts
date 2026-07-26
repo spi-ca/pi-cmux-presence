@@ -28,7 +28,7 @@ import {
   deriveTerminalState,
   formatAttentionTitle,
   formatAutoTitle,
-  formatParentAttentionFallback,
+  formatLocalTurnPresentation,
   formatSubagentAttention,
   formatProgressText,
   formatStateText,
@@ -241,6 +241,17 @@ export class PresenceRuntime {
     if (!this.sessionId) return;
     this.cancelFinalClear();
     if (!this.active) {
+      // Clock time can move past a deadline before its queued callback runs.
+      // Reconcile before this start can claim an inactive grace or reuse a run.
+      this.reconcileElapsedSubagentAttention();
+      const pending = this.subagentPending;
+      if (pending && pending.parentSettled !== null) {
+        // A settled parent's aggregate must not cross a run boundary, even if
+        // its deadline elapsed before the timer callback reached the event loop.
+        this.dispatchSubagentAttention(pending.generation, {
+          parentSucceeded: pending.terminal === "success" && pending.parentSettled === "success",
+        });
+      }
       this.active = true;
       this.parentRunRevision += 1;
       // A timeout fence belongs only to its original parent run.
@@ -361,9 +372,7 @@ export class PresenceRuntime {
         : "none";
     // A cancelled local run is status-only: it must not publish an attention
     // event even under permissive notification or flash policies.
-    this.suppressParentAttentionOnce = attention === "none"
-      ? false
-      : this.flushSubagentForParentSettlement(attention);
+    this.suppressParentAttentionOnce = this.flushSubagentForParentSettlement(attention);
     this.publish(this.terminal, attention);
     this.scheduleFinalClear(this.sessionEpoch);
 
@@ -463,7 +472,10 @@ export class PresenceRuntime {
   }
 
   private apply(event: PresenceUpdate): void {
-    const label = formatStateText(event, this.config.maxLabelChars);
+    const localPresentation = event.source.id === LOCAL_SOURCE.id
+      ? formatLocalTurnPresentation(event.state, this.config.maxLabelChars)
+      : null;
+    const label = localPresentation?.sidebar ?? formatStateText(event, this.config.maxLabelChars);
     void this.client?.status(
       this.statusKey(event.source.id),
       label,
@@ -487,7 +499,10 @@ export class PresenceRuntime {
           event.attention,
           event.source.id === LOCAL_SOURCE.id ? "local" : "external",
         )) {
-          void this.client?.notify(formatAttentionTitle(event, this.config.maxLabelChars), label);
+          void this.client?.notify(
+            localPresentation?.title ?? formatAttentionTitle(event, this.config.maxLabelChars),
+            localPresentation?.body ?? label,
+          );
         }
         if (!this.config.suppressNativeFlash && shouldFlashAttention(
           this.config.flashPolicy,
@@ -521,6 +536,9 @@ export class PresenceRuntime {
     }
     if (!observation.terminal) return;
 
+    // A terminal arriving after an elapsed deadline starts a fresh aggregate;
+    // it must not merge into the aggregate that deadline already closed.
+    this.reconcileElapsedSubagentAttention();
     const existing = this.subagentPending;
     const sameAggregate = existing?.generation === event.generation;
     const priorTerminal = sameAggregate ? existing.terminal : null;
@@ -571,7 +589,7 @@ export class PresenceRuntime {
       pending.errorDeadline = now + 10_000;
     }
     this.scheduleSubagentTimer(
-      remainingErrorDeadlineMs(pending.coalesceDeadline, now),
+      this.pendingSubagentWakeDelay(pending, now),
       pending.generation,
       pending.parentRun,
       () => this.finishSubagentCoalescing(pending.generation, pending.parentRun),
@@ -583,8 +601,24 @@ export class PresenceRuntime {
     if (!pending || pending.generation !== generation || pending.parentRun !== parentRun) return;
     const now = this.clock.now();
     const remainingBurst = remainingErrorDeadlineMs(pending.coalesceDeadline ?? now, now);
+    const errorDeadlineReached = pending.terminal === "error"
+      && pending.parentRun !== 0
+      && pending.errorDeadline !== null
+      && remainingErrorDeadlineMs(pending.errorDeadline, now) === 0;
+    // The first error's cap outranks a later semantic window. Only an exact,
+    // still-active and unsettled parent can be called out as still processing.
+    if (errorDeadlineReached) {
+      if (this.active && parentRun === this.parentRunRevision && pending.parentSettled === null) {
+        this.dispatchSubagentAttention(generation, { timeout: true });
+      } else {
+        this.dispatchSubagentAttention(generation, {
+          parentSucceeded: pending.terminal === "success" && pending.parentSettled === "success",
+        });
+      }
+      return;
+    }
     if (remainingBurst > 0) {
-      this.scheduleSubagentTimer(remainingBurst, generation, parentRun, () => {
+      this.scheduleSubagentTimer(this.pendingSubagentWakeDelay(pending, now), generation, parentRun, () => {
         this.finishSubagentCoalescing(generation, parentRun);
       });
       return;
@@ -627,25 +661,27 @@ export class PresenceRuntime {
   }
 
   /** A real parent settlement resolves only the aggregate bound to that run. */
-  private flushSubagentForParentSettlement(attention: "info" | AttentionKind): boolean {
-    if (this.fencedParentRun === this.parentRunRevision) return true;
+  private flushSubagentForParentSettlement(attention: "info" | AttentionKind | "none"): boolean {
+    const fenced = this.fencedParentRun === this.parentRunRevision;
     const pending = this.subagentPending;
-    if (!pending || pending.parentRun !== this.parentRunRevision) return false;
+    if (!pending || pending.parentRun !== this.parentRunRevision) return fenced;
     pending.parentSettled = this.terminal;
     if (pending.terminal === "success" && this.terminal === "error") {
       // A successful child aggregate must never hide the parent's local error.
       this.clearSubagentTimer();
       this.subagentPending = null;
-      return false;
+      return fenced;
     }
     if (pending.coalesceDeadline !== null
       && remainingErrorDeadlineMs(pending.coalesceDeadline, this.clock.now()) > 0) {
-      this.suppressedParentAttention = {
-        parentRun: pending.parentRun,
-        attention,
-        completed: this.completed,
-        failed: this.failed,
-      };
+      if (!fenced && attention !== "none") {
+        this.suppressedParentAttention = {
+          parentRun: pending.parentRun,
+          attention,
+          completed: this.completed,
+          failed: this.failed,
+        };
+      }
       return true;
     }
     this.dispatchSubagentAttention(pending.generation, {
@@ -704,12 +740,10 @@ export class PresenceRuntime {
     const fallback = this.suppressedParentAttention;
     if (!fallback || fallback.parentRun !== parentRun) return;
     this.suppressedParentAttention = null;
-    // The fallback is intentionally constructed from fixed local wording and
-    // bounded parent counters, never the invalidating producer event.
-    const content = formatParentAttentionFallback(
-      fallback.attention,
-      fallback.completed,
-      fallback.failed,
+    // The fallback is fixed local wording and never copies the invalidating
+    // producer event.
+    const content = formatLocalTurnPresentation(
+      fallback.attention === "error" ? "error" : "success",
       this.config.maxLabelChars,
     );
     if (this.officialHook) return;
@@ -731,6 +765,29 @@ export class PresenceRuntime {
     )) {
       void this.client?.flash();
     }
+  }
+
+  /** Resolve elapsed boundaries synchronously before lifecycle ownership changes. */
+  private reconcileElapsedSubagentAttention(): void {
+    const pending = this.subagentPending;
+    if (!pending) return;
+    const now = this.clock.now();
+    const windowElapsed = pending.coalesceDeadline !== null
+      && remainingErrorDeadlineMs(pending.coalesceDeadline, now) === 0;
+    const errorCapElapsed = pending.terminal === "error"
+      && pending.errorDeadline !== null
+      && remainingErrorDeadlineMs(pending.errorDeadline, now) === 0;
+    if (!windowElapsed && !errorCapElapsed) return;
+    this.finishSubagentCoalescing(pending.generation, pending.parentRun);
+  }
+
+  /** A pending active-parent error must wake for either its window or hard cap. */
+  private pendingSubagentWakeDelay(pending: PendingSubagentAttention, now: number): number {
+    const remainingBurst = remainingErrorDeadlineMs(pending.coalesceDeadline ?? now, now);
+    if (pending.terminal !== "error" || pending.parentRun === 0 || pending.errorDeadline === null) {
+      return remainingBurst;
+    }
+    return Math.min(remainingBurst, remainingErrorDeadlineMs(pending.errorDeadline, now));
   }
 
   private scheduleSubagentTimer(

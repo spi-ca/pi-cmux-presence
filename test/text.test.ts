@@ -3,6 +3,7 @@ import type { PresenceUpdate } from "../src/events.js";
 import {
   formatAttentionTitle,
   formatAutoTitle,
+  formatLocalTurnPresentation,
   formatProgressText,
   formatStateText,
   aggregateMetadata,
@@ -71,6 +72,27 @@ describe("UTF-8 bounded presence text", () => {
     const value = boundedPresenceText("😀".repeat(30), { maxBytes: 512, maxCodePoints: 16 });
     expect([...value]).toHaveLength(16);
     expect(value.endsWith("…")).toBe(true);
+  });
+
+  test("renders canonical local turn wording from state only within every destination bound", () => {
+    const canary = "assistant response preview prompt raw error /private/path tool output";
+    const expected = {
+      idle: "Idle",
+      waiting: "Waiting",
+      running: "Writing response",
+      success: "Response ready",
+      error: "Needs attention",
+      cancelled: "Cancelled",
+    } as const;
+
+    for (const [state, body] of Object.entries(expected) as Array<[keyof typeof expected, string]>) {
+      const rendered = formatLocalTurnPresentation(state, 32);
+      expect(rendered).toEqual({ sidebar: `Pi · ${body}`, title: "Pi", body });
+      expect(Buffer.byteLength(rendered.sidebar, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.v1Text);
+      expect(Buffer.byteLength(rendered.title, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.notificationTitle);
+      expect(Buffer.byteLength(rendered.body, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.notificationBody);
+      expect(`${rendered.sidebar}\n${rendered.title}\n${rendered.body}`).not.toContain(canary);
+    }
   });
 
   test("selects todo progress before other eligible progress", () => {

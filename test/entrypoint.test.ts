@@ -111,6 +111,30 @@ test("uses agent_end settlement only when agent_settled registration throws", as
   }
 });
 
+test("settled local success notifies exactly once only after an idle settlement", async () => {
+  const fixture = await presenceFixture();
+  try {
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = " settled ";
+    const pi = fakePi();
+    extension(pi.api as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "settled-local-session" } });
+    await pi.lifecycle("agent_start");
+    await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
+    await pi.lifecycle("agent_settled", {}, { isIdle: () => false });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+
+    await pi.lifecycle("agent_settled", {}, { isIdle: () => true });
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi"') && line.includes('"body":"Response ready"')));
+    await pi.lifecycle("agent_settled", {}, { isIdle: () => true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 const ENV_KEYS = [
   "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_SOCKET_PATH", "PI_CODING_AGENT_DIR", "CMUX_PI_HOOKS_DISABLED", "HOME",
   "PI_CMUX_PRESENCE_ENABLED", "PI_CMUX_PRESENCE_TIMEOUT_MS", "PI_CMUX_PRESENCE_MAX_QUEUE",
@@ -216,7 +240,7 @@ test("lifecycle observes Pi and generic producers through only the targeted fake
       attention: "success",
     };
     pi.emit(PI_PRESENCE_UPDATE_EVENT, producer);
-    await waitFor(() => fixture.lines.some((line) => line.includes("Pi: error · 1 failed")) && fixture.lines.some((line) => line.includes("Any producer: success · 1 done")));
+    await waitFor(() => fixture.lines.some((line) => line.includes("Pi · Needs attention")) && fixture.lines.some((line) => line.includes("Any producer: success · 1 done")));
     await pi.lifecycle("session_shutdown");
 
     const v1 = fixture.lines.filter((line) => !line.startsWith("{"));
@@ -231,7 +255,7 @@ test("lifecycle observes Pi and generic producers through only the targeted fake
     expect(localUpdates).toHaveLength(3);
     expect(localUpdates.every((event) => event.progress === undefined)).toBe(true);
     expect(v1.some((line) => line.startsWith("set_progress "))).toBe(false);
-    expect(v1).toContain(`set_status ${localKey} "Pi: error · 1 failed" --icon=x --color=#dc2626 --priority=40 --tab=${fixture.workspaceId} --panel=00000000-0000-4000-8000-000000000002`);
+    expect(v1).toContain(`set_status ${localKey} "Pi · Needs attention" --icon=x --color=#dc2626 --priority=40 --tab=${fixture.workspaceId} --panel=00000000-0000-4000-8000-000000000002`);
     expect(v1).toContain(`set_status ${producerKey} "Any producer: success · 1 done" --icon=check --color=#16a34a --priority=20 --tab=${fixture.workspaceId} --panel=00000000-0000-4000-8000-000000000002`);
     expect(v1).toContain(`clear_status ${localKey} --tab=${fixture.workspaceId}`);
     expect(v1).toContain(`clear_status ${producerKey} --tab=${fixture.workspaceId}`);
@@ -327,13 +351,13 @@ test("pi-subagent terminals use a cumulative baseline, coalesce errors over succ
     update(2, 1, 0, "success");
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
     update(3, 1, 1, "error");
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 완료 · 1개 실패")));
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents need attention"') && line.includes("1 completed · 1 failed")));
     await new Promise<void>((resolve) => setTimeout(resolve, 800));
 
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .filter((request) => request.method === "notification.create_for_surface");
     expect(notifications).toHaveLength(1);
-    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "1개 완료 · 1개 실패" });
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents need attention", body: "1 completed · 1 failed" });
     expect(JSON.stringify(notifications)).not.toContain("Leaky task label");
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
     await pi.lifecycle("session_shutdown");
@@ -359,7 +383,7 @@ test("session teardown fences pending pi-subagent success timers", async () => {
     });
     await pi.lifecycle("session_shutdown");
     await new Promise<void>((resolve) => setTimeout(resolve, 800));
-    expect(fixture.lines.some((line) => line.includes('"title":"Subagents 완료"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"title":"Subagents completed"'))).toBe(false);
   } finally { await fixture.cleanup(); }
 });
 
@@ -383,13 +407,13 @@ test("pi-subagent success merges with parent settlement without delaying other p
     });
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi 응답 준비됨"')), 700);
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi response ready"')), 700);
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .filter((request) => request.method === "notification.create_for_surface");
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.params).toMatchObject({
-      title: "Pi 응답 준비됨",
-      body: "Subagent 1개 완료",
+      title: "Pi response ready",
+      body: "Subagents: 1 completed",
     });
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
@@ -408,7 +432,7 @@ test("an explicit agent_start inside the success grace joins the next parent set
     await pi.lifecycle("agent_start");
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "stop" }] });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi 응답 준비됨"') && line.includes("Subagent 2개 완료")), 700);
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Pi response ready"') && line.includes("Subagents: 2 completed")), 700);
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
 });
@@ -432,11 +456,11 @@ test("success coalescing keeps the first 450ms deadline during a sustained burst
     // 450ms deadline another 450ms into the future.
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
     update(3, 2);
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 완료"') && line.includes("2개 완료")), 400);
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents completed"') && line.includes("2 completed")), 400);
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .filter((request) => request.method === "notification.create_for_surface");
     expect(notifications).toHaveLength(1);
-    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 완료", body: "2개 완료" });
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents completed", body: "2 completed" });
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
 });
@@ -458,9 +482,9 @@ test("error coalescing keeps the first 100ms semantic deadline", async () => {
     update(2, 1);
     await new Promise<void>((resolve) => setTimeout(resolve, 70));
     update(3, 2);
-    await waitFor(() => fixture.requests.some((request) => request.line.includes('"title":"Subagents 확인 필요"')));
-    const notification = fixture.requests.find((request) => request.line.includes('"title":"Subagents 확인 필요"'))!;
-    expect(notification.line).toContain("2개 실패");
+    await waitFor(() => fixture.requests.some((request) => request.line.includes('"title":"Subagents need attention"')));
+    const notification = fixture.requests.find((request) => request.line.includes('"title":"Subagents need attention"'))!;
+    expect(notification.line).toContain("2 failed");
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
 });
@@ -488,12 +512,12 @@ test("parent settlement waits for the first error window and aggregates a second
     expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
 
     update(3, 2);
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("2개 실패"))
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents need attention"') && line.includes("2 failed"))
       && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')), 250);
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .filter((request) => request.method === "notification.create_for_surface");
     expect(notifications).toHaveLength(1);
-    expect(notifications[0]?.params).toMatchObject({ title: "Subagents 확인 필요", body: "2개 실패" });
+    expect(notifications[0]?.params).toMatchObject({ title: "Subagents need attention", body: "2 failed" });
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
@@ -528,7 +552,7 @@ test("generation replacement restores a parent error suppressed for a deferred c
     expect(notifications.map((request) => request.params.title)).toEqual(["Pi"]);
     expect(JSON.stringify(notifications)).not.toContain("Untrusted label");
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
-    expect(fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"title":"Subagents need attention"'))).toBe(false);
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
 });
@@ -597,11 +621,11 @@ test("parent settlement emits an aggregate child error once", async () => {
     pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error" });
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"'))
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents need attention"'))
       && fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
       .filter((request) => request.method === "notification.create_for_surface");
-    expect(notifications.map((request) => request.params.title)).toEqual(["Subagents 확인 필요"]);
+    expect(notifications.map((request) => request.params.title)).toEqual(["Subagents need attention"]);
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
     await pi.lifecycle("session_shutdown");
   } finally { await fixture.cleanup(); }
@@ -633,7 +657,7 @@ test("official hook consumes successful child bursts before unrelated terminals"
     // success if that parent has not yet settled.
     await pi.lifecycle("agent_start");
     await new Promise<void>((resolve) => setTimeout(resolve, 800));
-    await waitFor(() => fixture.lines.filter((line) => line.includes("log --level=success") && line.includes("2개 완료")).length === 1);
+    await waitFor(() => fixture.lines.filter((line) => line.includes("log --level=success") && line.includes("2 completed")).length === 1);
     expect(fixture.lines.filter((line) => line.includes("log --level=success"))).toHaveLength(1);
     expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
     expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
@@ -641,10 +665,10 @@ test("official hook consumes successful child bursts before unrelated terminals"
     update(4, 2, 1, "error");
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 실패")));
-    const errors = fixture.lines.filter((line) => line.includes('"title":"Subagents 확인 필요"'));
+    await waitFor(() => fixture.lines.some((line) => line.includes('"title":"Subagents need attention"') && line.includes("1 failed")));
+    const errors = fixture.lines.filter((line) => line.includes('"title":"Subagents need attention"'));
     expect(errors).toHaveLength(1);
-    expect(errors[0]).not.toContain("2개 완료");
+    expect(errors[0]).not.toContain("2 completed");
     await pi.lifecycle("session_shutdown");
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -741,7 +765,7 @@ test("reviewed child suppression also applies to deferred parent-error fallback"
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
     await pi.lifecycle("agent_settled");
     update(2, 1, 0, "none");
-    await waitFor(() => fixture.lines.some((line) => line.startsWith("log --level=error") && line.includes("Pi: error")));
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("log --level=error") && line.includes("Needs attention")));
     expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
     expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
     await pi.lifecycle("session_shutdown");
@@ -761,7 +785,7 @@ test("cancelled local runs publish no attention even under permissive policies",
     await pi.lifecycle("agent_start");
     await pi.lifecycle("agent_end", { messages: [{ stopReason: "aborted" }] });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes("Pi: cancelled")));
+    await waitFor(() => fixture.lines.some((line) => line.includes("Pi · Cancelled")));
     expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
     expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
     expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
@@ -785,12 +809,12 @@ test("official hook suppresses only local completion attention", async () => {
     pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 3, sequence: 2, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" });
     pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 3, sequence: 3, source: { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, state: "error", counts: { active: 0, completed: 1, failed: 1 }, attention: "error" });
     pi.emit(PI_PRESENCE_UPDATE_EVENT, { version: 1, sessionId, generation: 2, sequence: 1, source: { id: "external", label: "External", kind: "task" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" });
-    await waitFor(() => fixture.lines.some((line) => line.includes("External: success")) && fixture.lines.some((line) => line.includes('"title":"External"')) && fixture.lines.some((line) => line.includes('"title":"Subagents 확인 필요"') && line.includes("1개 완료 · 1개 실패")));
+    await waitFor(() => fixture.lines.some((line) => line.includes("External: success")) && fixture.lines.some((line) => line.includes('"title":"External"')) && fixture.lines.some((line) => line.includes('"title":"Subagents need attention"') && line.includes("1 completed · 1 failed")));
     const notifications = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)).filter((request) => request.method === "notification.create_for_surface");
     expect(notifications.some((request) => request.params.title === "Pi")).toBe(false);
     expect(notifications.some((request) => request.params.title === "External")).toBe(true);
-    expect(notifications.filter((request) => request.params.title === "Subagents 확인 필요")).toHaveLength(1);
-    expect(notifications.some((request) => request.params.title === "Subagents 완료")).toBe(false);
+    expect(notifications.filter((request) => request.params.title === "Subagents need attention")).toHaveLength(1);
+    expect(notifications.some((request) => request.params.title === "Subagents completed")).toBe(false);
     await pi.lifecycle("session_shutdown");
   } finally { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; await fs.rm(agentDir, { recursive: true, force: true }); await fixture.cleanup(); }
 });
@@ -830,7 +854,7 @@ test("preserves aggregate usage across agent continuations and ignores forged lo
       counts: { active: 0, completed: 999, failed: 0 },
     });
     await pi.lifecycle("agent_settled");
-    await waitFor(() => fixture.lines.some((line) => line.includes("Pi: error · 1 failed · 30 tokens · $0.03")));
+    await waitFor(() => fixture.lines.some((line) => line.includes("Pi · Needs attention")));
     const localUpdates = pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi");
     expect(localUpdates.at(-1)).toMatchObject({ state: "error", counts: { active: 0, completed: 0, failed: 1 }, usage: { tokens: 30, cost: 0.03 } });
     expect(fixture.lines.some((line) => line.includes("Forged"))).toBe(false);

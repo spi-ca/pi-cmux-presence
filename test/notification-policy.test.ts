@@ -53,14 +53,14 @@ describe("notification policy", () => {
     expect(remainingErrorDeadlineMs(10_000, 9_900)).toBe(100);
     expect(remainingErrorDeadlineMs(10_000, 10_001)).toBe(0);
     expect(formatSubagentAttention("error", 2, 1, { timeout: true }, 96)).toMatchObject({
-      title: "Subagent 실패",
-      body: "2개 완료 · 1개 실패 · Parent가 결과 처리 중",
+      title: "Subagent failed",
+      body: "2 completed · 1 failed · Parent is processing results",
     });
     expect(formatSubagentAttention("success", 0, 0, { parentSucceeded: true }, 96)).toMatchObject({
-      title: "Pi 응답 준비됨",
-      body: "Subagent 작업 완료",
+      title: "Pi response ready",
+      body: "Subagent task completed",
     });
-    expect(formatSubagentAttention("success", 3, 0, { parentSucceeded: true }, 96).body).toBe("Subagent 3개 완료");
+    expect(formatSubagentAttention("success", 3, 0, { parentSucceeded: true }, 96).body).toBe("Subagents: 3 completed");
   });
 
   test("applies exact global notify and flash policy semantics", () => {
@@ -69,6 +69,12 @@ describe("notification policy", () => {
     expect(shouldNotifyAttention("background", true, "success", "external")).toBe(true);
     expect(shouldNotifyAttention("background", true, "success", "local")).toBe(false);
     expect(shouldNotifyAttention("background", true, "success", "local", true)).toBe(true);
+    expect(shouldNotifyAttention("settled", true, "success", "local")).toBe(true);
+    expect(shouldNotifyAttention("settled", true, "error", "local")).toBe(true);
+    expect(shouldNotifyAttention("settled", true, "info", "external")).toBe(false);
+    expect(shouldNotifyAttention("settled", true, "success", "external")).toBe(false);
+    expect(shouldNotifyAttention("settled", true, "error", "external")).toBe(true);
+    expect(shouldNotifyAttention("settled", false, "error", "local")).toBe(false);
     expect(shouldNotifyAttention("all", true, "info", "local")).toBe(true);
     expect(shouldNotifyAttention("disabled", true, "error", "external")).toBe(false);
     expect(shouldNotifyAttention("all", false, "error", "external")).toBe(false);

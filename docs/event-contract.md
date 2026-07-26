@@ -68,10 +68,10 @@ cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress�
 
 - `completed`·`failed`·`cancelled`의 **누적** count baseline을 같은 generation 안에서 비교합니다. success/info는 `completed`가 증가한 경우, error는 `failed`가 증가한 경우에만 terminal 후보가 됩니다. 취소 상태는 attention 후보가 아니며 `cancelled` 증가도 완료 attention을 만들지 않습니다.
 - 처음 보거나 generation이 바뀐 non-`none` attention은 이전 누적 이력이 없으므로 count `0`의 unknown live signal로만 처리합니다. 어느 누적 count라도 감소하면 baseline을 새 값으로 교체하고 그 update 및 쌓인 burst를 fail-closed로 버립니다.
-- success는 첫 success에서 시작하는 **고정 450ms**, error는 첫 error에서 시작하는 **고정 100ms** semantic window에서 같은 burst를 모읍니다. 부모 Pi가 활성이어도 window는 닫히며, 뒤따른 terminal은 deadline을 연장하지 않습니다. window가 닫힌 뒤 같은 부모 run·generation에 연결된 새 terminal은 새 고정 window를 시작할 수 있지만, 누적 delta는 같은 부모 aggregate에 계속 더해져 그 부모 settlement에서 notification 한 번으로 확정될 수 있습니다. error가 같은 aggregate의 success보다 우선합니다.
-- 부모 settlement가 아직 열린 window 안에 들어오면 즉시 dispatch하지 않고 window가 닫힐 때까지 보류하여 그 안의 delta를 함께 처리합니다. 활성 부모에 연결된 error는 window가 닫힌 뒤 settlement를 기다릴 수 있으나, 최초 error부터 10초가 상한입니다. 10초 timeout이 한 번 dispatch하면 **그 부모 run만** fence하여 그 뒤의 같은 부모 settlement가 중복 native attention을 만들지 않게 하며, 다음 부모 run은 fence하지 않습니다. 부모가 비활성일 때 시작된 error는 독립적이므로 100ms 중에 부모가 시작해도 그 부모에 연결하거나 기다리지 않습니다.
+- success는 첫 success에서 시작하는 **고정 450ms**, error는 첫 error에서 시작하는 **고정 100ms** semantic window에서 같은 burst를 모읍니다. 부모 Pi가 활성이어도 window는 닫히며, 현재 같은 종류 window의 뒤따른 terminal은 deadline을 연장하지 않습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. window가 닫힌 뒤 같은 부모 run·generation에 연결된 새 terminal은 새 고정 window를 시작할 수 있지만, 누적 delta는 같은 부모 aggregate에 계속 더해져 그 부모 settlement에서 notification 한 번으로 확정될 수 있습니다. error가 같은 aggregate의 success보다 우선합니다.
+- 부모 settlement가 아직 열린 window 안에 들어오면 즉시 dispatch하지 않고 window가 닫힐 때까지 보류하여 그 안의 delta를 함께 처리합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 활성 부모에 연결된 error는 window가 닫힌 뒤 settlement를 기다릴 수 있으나, 최초 error부터 10초가 상한이고 뒤늦은 semantic window도 이를 늦추지 않습니다. 10초 timeout이 한 번 dispatch하면 **그 부모 run만** fence하여 그 뒤의 같은 부모 settlement가 중복 native attention을 만들지 않게 하며, 다음 부모 run은 fence하지 않습니다. 부모가 비활성일 때 시작된 error는 독립적이므로 100ms 중에 부모가 시작해도 그 부모에 연결하거나 기다리지 않습니다.
 - 이는 socket queue의 same-key latest-write-wins와 다른 **의미적 terminal coalescing**입니다. 전자는 아직 실행되지 않은 UI 요청의 전송 최적화이고, 후자는 누적 count와 lifecycle을 해석해 notification 수를 정하는 정책입니다.
-- 성공한 child 집계와 성공한 부모가 실제 `agent_settled`(해당 hook을 지원하지 않는 host에서는 `agent_end` fallback)에서 관찰되어 함께 확정된 경우에만 notification title을 정확히 `Pi 응답 준비됨`으로 표시합니다. grace 또는 child success만으로 부모 결과·응답 준비를 주장하지 않습니다.
+- 성공한 child 집계와 성공한 부모가 실제 `agent_settled`(해당 hook을 지원하지 않는 host에서는 `agent_end` fallback)에서 관찰되어 함께 확정된 경우에만 notification title을 정확히 `Pi response ready`으로 표시합니다. grace 또는 child success만으로 부모 결과·응답 준비를 주장하지 않습니다.
 
 공식 cmux hook이 우선할 때 이 exact source의 버퍼된 success는 native notification/flash로 보내지 않습니다(설정한 log는 가능). error 집계는 정책과 capability가 허용하면 한 번 계속 보냅니다. hook 감지는 비동기이지만 session epoch와 session ID로 fence하므로, 이전 세션의 지연된 probe 결과가 현재 세션의 precedence를 바꾸지 않습니다. 다른 외부 source에는 이 special policy를 적용하지 않습니다.
 
@@ -118,3 +118,9 @@ pi.events.emit("pi-presence:update:v1", {
 ```
 
 `progress`·`usage`는 producer가 실제로 제공할 때만 넣습니다. consumer는 이를 추정하지 않습니다. 다만 attention 집계에는 위 절의 정확한 `source.id: "pi-subagent"` 예외가 있으며, 그 외 외부 producer에는 source별 generic 규칙을 적용합니다.
+
+## local turn presentation and settled policy
+
+내장 `pi` source는 event payload의 assistant response body·preview, user prompt, raw error, path 또는 tool content를 sidebar/notification에 추가하지 않습니다. 상태별 고정 summary는 `Waiting`, `Writing response`, `Response ready`, `Needs attention`, `Cancelled`이며 sidebar는 각각 `Pi · <summary>`, notification은 title `Pi`와 같은 summary body를 사용합니다.
+
+`agent_end`는 terminal reason을 기록할 뿐입니다. idle `agent_settled`가 실제로 도착해야 local terminal event가 확정되며, host가 `agent_settled` 등록을 거부한 경우에만 `agent_end` fallback을 씁니다. `PI_CMUX_PRESENCE_NOTIFY_POLICY=settled`는 이 확정 local success/error와 external error를 notification 대상으로 하고 external info/success는 대상에서 제외합니다. legacy kill switch, policy, V2 capability 및 official-hook precedence의 전체 gate는 [`configuration.md`](configuration.md)를 따릅니다. local terminal status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 clear되며 notification 보존은 cmux 소유입니다.

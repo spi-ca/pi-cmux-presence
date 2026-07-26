@@ -46,6 +46,7 @@ describe("resolvePresenceConfig", () => {
   test.each([
     ["PI_CMUX_PRESENCE_NOTIFY_POLICY", "notificationPolicy", "errors"],
     ["PI_CMUX_PRESENCE_NOTIFY_POLICY", "notificationPolicy", "background"],
+    ["PI_CMUX_PRESENCE_NOTIFY_POLICY", "notificationPolicy", "settled"],
     ["PI_CMUX_PRESENCE_NOTIFY_POLICY", "notificationPolicy", "all"],
     ["PI_CMUX_PRESENCE_NOTIFY_POLICY", "notificationPolicy", "disabled"],
     ["PI_CMUX_PRESENCE_FLASH_POLICY", "flashPolicy", "errors"],

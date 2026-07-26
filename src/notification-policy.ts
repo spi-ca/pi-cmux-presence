@@ -3,7 +3,7 @@ import type { PresenceUpdate } from "./events.js";
 /** Exact producer identity; labels and kinds are descriptive, never routing authority. */
 export const PI_SUBAGENT_SOURCE_ID = "pi-subagent";
 
-export type NotificationPolicy = "errors" | "background" | "all" | "disabled";
+export type NotificationPolicy = "errors" | "background" | "settled" | "all" | "disabled";
 export type FlashPolicy = "errors" | "attention" | "disabled";
 export type AttentionKind = "success" | "error";
 export type AttentionOrigin = "local" | "external";
@@ -120,6 +120,12 @@ export function isAttentionEligible(
 ): boolean {
   if (policy === "disabled" || attention === "none" || attention === undefined) return false;
   if (policy === "errors") return attention === "error";
+  if (policy === "settled") {
+    // Generic external completion is intentionally quiet. An exact merged
+    // parent/subagent success represents a finalized local completion.
+    return attention === "error"
+      || (attention === "success" && (origin === "local" || mergedWithSubagent));
+  }
   if (policy === "all") return true;
   // background: external producers retain their non-none attention; local
   // success is only useful as the merged parent/subagent completion.

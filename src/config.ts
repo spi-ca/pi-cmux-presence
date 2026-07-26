@@ -69,7 +69,7 @@ const SETTINGS = {
     type: "enum",
     env: "PI_CMUX_PRESENCE_NOTIFY_POLICY",
     defaultValue: "background",
-    values: ["errors", "background", "all", "disabled"],
+    values: ["errors", "background", "settled", "all", "disabled"],
   },
   flashPolicy: {
     type: "enum",

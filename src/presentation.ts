@@ -22,6 +22,43 @@ export const PRESENCE_STATE_STYLES: Record<PresenceUpdate["state"], PresenceStyl
   cancelled: { icon: "minus", color: "#6b7280", priority: 20 },
 };
 
+const LOCAL_TURN_SUMMARIES: Record<PresenceUpdate["state"], string> = {
+  idle: "Idle",
+  waiting: "Waiting",
+  running: "Writing response",
+  success: "Response ready",
+  error: "Needs attention",
+  cancelled: "Cancelled",
+};
+
+export interface LocalTurnPresentation {
+  readonly sidebar: string;
+  readonly title: string;
+  readonly body: string;
+}
+
+/** Fixed local wording deliberately excludes every assistant and user payload. */
+export function formatLocalTurnPresentation(
+  state: PresenceUpdate["state"],
+  maxCodePoints: number,
+): LocalTurnPresentation {
+  const body = boundedPresenceText(LOCAL_TURN_SUMMARIES[state], {
+    maxBytes: CMUX_TEXT_BYTES.notificationBody,
+    maxCodePoints,
+  });
+  return {
+    sidebar: boundedPresenceText(`Pi · ${body}`, {
+      maxBytes: CMUX_TEXT_BYTES.v1Text,
+      maxCodePoints,
+    }),
+    title: boundedPresenceText("Pi", {
+      maxBytes: CMUX_TEXT_BYTES.notificationTitle,
+      maxCodePoints,
+    }),
+    body,
+  };
+}
+
 export function presenceStatusKey(sourceId: string, surfaceId?: string): string {
   const hashInput = surfaceId ? `${surfaceId}:${sourceId}` : sourceId;
   const hash = createHash("sha256").update(hashInput, "utf8").digest("hex");
@@ -92,20 +129,20 @@ export function formatSubagentAttention(
   maxCodePoints: number,
 ): { title: string; body: string; attention: AttentionKind } {
   const parts: string[] = [];
-  if (completedDelta > 0) parts.push(`${completedDelta}개 완료`);
-  if (failedDelta > 0) parts.push(`${failedDelta}개 실패`);
-  const summary = parts.join(" · ") || (attention === "error" ? "Subagent 작업 실패" : "Subagent 작업 완료");
+  if (completedDelta > 0) parts.push(`${completedDelta} completed`);
+  if (failedDelta > 0) parts.push(`${failedDelta} failed`);
+  const summary = parts.join(" · ") || (attention === "error" ? "Subagent task failed" : "Subagent task completed");
   const title = options.timeout
-    ? "Subagent 실패"
+    ? "Subagent failed"
     : options.parentSucceeded && attention === "success"
-      ? "Pi 응답 준비됨"
+      ? "Pi response ready"
       : attention === "error"
-        ? "Subagents 확인 필요"
-        : "Subagents 완료";
+        ? "Subagents need attention"
+        : "Subagents completed";
   const body = options.timeout
-    ? `${summary} · Parent가 결과 처리 중`
+    ? `${summary} · Parent is processing results`
     : options.parentSucceeded && attention === "success" && parts.length > 0
-      ? `Subagent ${summary}`
+      ? `Subagents: ${summary}`
       : summary;
   return {
     title: boundedPresenceText(title, {

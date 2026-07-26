@@ -39,10 +39,10 @@ root aggregate와 child `inherit` 같은 실행·집계 규칙은 producer 쪽�
 
 1. consumer는 같은 generation의 이전 `completed`·`failed`·`cancelled` baseline과 현재 count의 delta를 비교합니다. success/info는 `completed` 증가, error는 `failed` 증가가 있어야 terminal 후보입니다. `cancelled` 상태와 cancellation delta는 attention을 만들지 않습니다.
 2. 첫 update 또는 generation 변경 뒤의 non-`none` attention에는 신뢰할 과거 baseline이 없습니다. 이 경우 count를 과거 완료로 해석하지 않는 unknown live signal만 가능합니다. 어느 누적 count든 감소하면 consumer는 해당 update와 쌓인 burst를 fail-closed로 버리고 새 baseline부터 다시 시작합니다.
-3. success terminal은 첫 success부터 고정 450ms, error terminal은 첫 error부터 고정 100ms window에서 같은 burst를 모읍니다. 부모 Pi run이 활성이어도 window는 닫히며, 뒤따른 terminal은 deadline을 연장하지 않습니다. window가 닫힌 뒤에도 같은 부모 run·generation에 연결된 terminal은 새 고정 window를 시작할 수 있고, 그 delta는 같은 부모 aggregate에 더해져 settlement에서 notification 한 번으로 확정될 수 있습니다. settlement가 열린 window 안에 도착하면 dispatch는 window 종료까지 보류합니다. 활성 부모에 연결된 error는 window 뒤 settlement를 기다릴 수 있지만 최초 error부터 최대 10초에 한 번 dispatch하며, 그 timeout은 해당 부모 run의 뒤늦은 settlement만 fence해 중복 native attention을 막습니다. 비활성 부모에서 시작된 error는 독립적이므로 100ms 안에 부모가 시작해도 그 부모를 기다리지 않습니다. 같은 aggregate에서는 error가 success보다 우선합니다.
+3. success terminal은 첫 success부터 고정 450ms, error terminal은 첫 error부터 고정 100ms window에서 같은 burst를 모읍니다. 부모 Pi run이 활성이어도 window는 닫히며, 현재 같은 종류 window의 뒤따른 terminal은 deadline을 연장하지 않습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. window가 닫힌 뒤에도 같은 부모 run·generation에 연결된 terminal은 새 고정 window를 시작할 수 있고, 그 delta는 같은 부모 aggregate에 더해져 settlement에서 notification 한 번으로 확정될 수 있습니다. settlement가 열린 window 안에 도착하면 dispatch는 window 종료까지 보류합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 활성 부모에 연결된 error는 window 뒤 settlement를 기다릴 수 있지만 최초 error부터 최대 10초에 한 번 dispatch하며, 뒤늦은 semantic window가 이를 늦추지 않습니다. timeout만 해당 부모 run의 뒤늦은 settlement를 fence해 중복 native attention을 막습니다. 비활성 부모에서 시작된 error는 독립적이므로 100ms 안에 부모가 시작해도 그 부모를 기다리지 않습니다. 같은 aggregate에서는 error가 success보다 우선합니다.
 4. 이 semantic terminal coalescing은 Unix socket queue의 latest-write-wins와 다릅니다. queue 방식은 아직 실행하지 않은 같은 UI key의 전송을 최신 요청으로 바꾸는 최적화이고, terminal coalescing은 count delta와 parent lifecycle을 사용해 user-facing alert를 한 번으로 만드는 정책입니다.
 
-성공 child aggregate와 성공 부모가 실제 `agent_settled`에서 관찰되어 함께 확정된 경우에만 title은 정확히 `Pi 응답 준비됨`입니다. 이 문구는 child 완료만으로 parent 응답이 준비되었다고 주장하지 않으며, settlement 관찰 전에는 사용하지 않습니다. host가 `agent_settled` 등록을 지원하지 않을 때만 `agent_end` fallback이 사용됩니다.
+성공 child aggregate와 성공 부모가 실제 `agent_settled`에서 관찰되어 함께 확정된 경우에만 title은 정확히 `Pi response ready`입니다. 이 문구는 child 완료만으로 parent 응답이 준비되었다고 주장하지 않으며, settlement 관찰 전에는 사용하지 않습니다. host가 `agent_settled` 등록을 지원하지 않을 때만 `agent_end` fallback이 사용됩니다.
 
 공식 cmux hook이 우선하면 이 exact source의 버퍼된 success는 native notification/flash로 보내지 않습니다. `PI_CMUX_PRESENCE_LOG=true`이면 안전한 집계 log는 남을 수 있습니다. 집계 error는 해당 policy와 V2 capability가 허용하면 한 번 notification/flash할 수 있습니다. 이 예외는 일반 외부 producer attention이 항상 hook을 통과한다는 이전 해석을 대체합니다.
 
@@ -50,11 +50,11 @@ root aggregate와 child `inherit` 같은 실행·집계 규칙은 producer 쪽�
 
 정확한 값과 precedence는 [`configuration.md`](configuration.md)를 기준으로 합니다.
 
-- `PI_CMUX_PRESENCE_NOTIFY_POLICY`: `errors` / `background`(기본) / `all` / `disabled`
+- `PI_CMUX_PRESENCE_NOTIFY_POLICY`: `errors` / `background`(기본) / `settled` / `all` / `disabled`
 - `PI_CMUX_PRESENCE_FLASH_POLICY`: `errors`(기본) / `attention` / `disabled`
 - 레거시 `PI_CMUX_PRESENCE_NOTIFICATIONS=false` 또는 `PI_CMUX_PRESENCE_FLASH=false`는 enum보다 우선하는 강제 disable입니다. 레거시 `true`는 명시 enum을 덮어쓰지 않습니다. 빈 값이나 잘못된 enum은 각각 기본값으로 돌아갑니다.
 
-기본 구성에서는 성공에 notification/flash를 보장하지 않으며 success flash도 기본 비활성입니다. error attention은 허용된 policy와 capability 아래 한 번의 notification 및 한 번의 flash 대상입니다. 모든 출력은 socket 오류·거부·capability 부재 시 best-effort로 유실될 수 있고, producer 실행·결과·취소를 실패시키지 않습니다.
+기본값은 계속 `background`입니다. `settled`를 명시하면 정확히 settle된 local Pi success/error와 external error는 notification 대상이지만 external info/success는 대상이 아닙니다. 기본 구성에서는 성공에 notification/flash를 보장하지 않으며 success flash도 기본 비활성입니다. error attention은 허용된 policy와 capability 아래 한 번의 notification 및 한 번의 flash 대상입니다. 모든 출력은 socket 오류·거부·capability 부재 시 best-effort로 유실될 수 있고, producer 실행·결과·취소를 실패시키지 않습니다.
 
 ## ready, authority 및 실패 격리
 

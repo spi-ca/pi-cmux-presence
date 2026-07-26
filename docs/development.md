@@ -39,14 +39,14 @@ src/transport.ts          — 소켓 재검증, 단일 직렬 queue, keyed lates
 src/usage.ts              — assistant message별 usage delta의 토큰·비용 누적과 context 사용률 집계
 src/validation.ts         — untrusted input의 plain-object·control/bidi·protocol token 공통 검증
 test/client.test.ts       — PresenceClient의 capability-gated V2/V1 쓰기와 resume ownership 테스트
-test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트
+test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트(`settled` trim/case 포함)
 test/entrypoint.test.ts   — 공개 확장 진입점의 lifecycle/event 등록, exact child-profile suppression, terminal coalescing 테스트
-test/notification-policy.test.ts — exact `pi-subagent` cumulative terminal 판정, notification/flash policy, 고정 deadline 산술 테스트
+test/notification-policy.test.ts — exact `pi-subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — manual clock과 fake Unix socket으로 활성 부모의 고정 window·후속 burst settlement 집계, 독립 error, 10초 fence, stale official-hook probe 및 callback fence를 결정적으로 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
 test/socket-only.test.ts  — production 소스에 process 실행 API가 없음을 확인하는 정적 가드 테스트
 test/state.test.ts        — event registry 파싱, source fence, todo adapter, identity, usage 상태 테스트
-test/text.test.ts         — presentation 렌더링과 text 정규화·축약 테스트
+test/text.test.ts         — canonical local turn presentation, text 정규화·축약과 byte-bound 테스트
 test/transport.test.ts    — UnixSocketTransport 연결 lifecycle과 BoundedSocketQueue 테스트
 test/helpers/             — 테스트 전용 in-memory fake Unix 소켓 서버(`fake-socket.ts`)
 docs/                     — 주제별 문서
@@ -81,11 +81,12 @@ bun run diagram:render
 - 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
 - 검토한 child profile은 정확한 `PI_CMUX_PROFILE=subagent-child-v1`와 channel별 exact disable만 해석합니다. partial·malformed `PI_CMUX_*` 값이나 `PI_CMUX_SIDEBAR_SOURCE`로 다른 suppression을 추론하지 않고, sidebar/status·progress·log를 끄지 않습니다.
 - local Pi 및 exact `pi-subagent` cancellation은 status-only `attention: "none"`입니다. `all`/`attention` policy에서도 notification·flash·attention log로 승격하지 않습니다.
+- local Pi sidebar/notification은 canonical fixed summary만 사용합니다. assistant response body·preview, prompt, raw error, path, tool argument/output을 새 전송 text로 추가하지 않으며 terminal sidebar는 `finalClearMs` 뒤 clear합니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
 - feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. generic presence update나 `pi-subagent` producer를 추가해도 이 기능이나 live cmux mutation/focus 제어를 암묵적으로 활성화하지 않습니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
 
 ## 검증 범위
 
-`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값 포함), V1/V2 codec과 multibyte 경계, capability gate, event/ready contract, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
+`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값, `settled` trim/case 포함), V1/V2 codec과 multibyte 경계, capability gate, event/ready contract, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, `settled` policy matrix, canonical local presentation의 static/no-payload byte bound, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
 
 이 검증은 consumer 쪽 generic producer shape, 검토한 exact child-profile suppression, fake Unix socket과 정적 status-key namespace까지만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 연동은 검증하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
 
