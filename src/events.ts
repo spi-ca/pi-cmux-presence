@@ -1,6 +1,7 @@
 import { hasControlOrBidi, isPlainObject } from "./validation.js";
 
 export const PI_PRESENCE_UPDATE_EVENT = "pi-presence:update:v1" as const;
+export const PI_PRESENCE_REMOVE_EVENT = "pi-presence:remove:v1" as const;
 export const PI_PRESENCE_READY_EVENT = "pi-presence:ready:v1" as const;
 const MAX_TEXT = 96;
 const MAX_SOURCES = 64;
@@ -9,9 +10,11 @@ export const MAX_COUNT = 1_000_000;
 const STATES = new Set(["idle", "waiting", "running", "success", "error", "cancelled"]);
 const ATTENTION = new Set(["none", "info", "success", "error"]);
 const ROOT_KEYS = ["version", "sessionId", "generation", "sequence", "source", "state", "counts", "progress", "usage", "attention"];
+const REMOVE_ROOT_KEYS = ["version", "sessionId", "generation", "sequence", "source"];
 const READY_KEYS = ["version", "sessionId", "consumer"];
 const CONSUMER_KEYS = ["id", "capabilities"];
 const SOURCE_KEYS = ["id", "label", "kind"];
+const REMOVE_SOURCE_KEYS = ["id"];
 const COUNT_KEYS = ["active", "completed", "failed", "queued", "cancelled", "total"]; 
 const REQUIRED_COUNT_KEYS = ["active", "completed", "failed"]; 
 const PROGRESS_KEYS = ["value", "label"];
@@ -29,6 +32,21 @@ export interface PresenceUpdate {
   progress?: { value: number; label?: string };
   usage?: PresenceUsage;
   attention?: "none" | "info" | "success" | "error";
+}
+
+/** A producer withdrawal retains only its ordering fence, never its display state. */
+export interface PresenceRemove {
+  version: 1;
+  sessionId: string;
+  generation: number;
+  sequence: number;
+  source: { id: string };
+}
+
+export interface PresenceRemoveResult {
+  readonly accepted: boolean;
+  /** The exact retained update that was withdrawn, if one still existed. */
+  readonly removed?: PresenceUpdate;
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -124,6 +142,32 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
   }
 }
 
+/** Parse a withdrawal envelope without permitting producer-controlled display data. */
+export function parsePresenceRemove(value: unknown): PresenceRemove | null {
+  try {
+    if (!isPlainObject(value) || !hasOnlyKeys(value, REMOVE_ROOT_KEYS)) return null;
+    if (!hasOwn(value, "version") || !hasOwn(value, "sessionId") || !hasOwn(value, "generation") || !hasOwn(value, "sequence") || !hasOwn(value, "source")) return null;
+    const version = value.version;
+    const sessionId = value.sessionId;
+    const eventGeneration = value.generation;
+    const eventSequence = value.sequence;
+    const rawSource = value.source;
+    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence)
+      || !isPlainObject(rawSource) || !hasOnlyKeys(rawSource, REMOVE_SOURCE_KEYS) || !hasOwn(rawSource, "id")) return null;
+    const sourceId = rawSource.id;
+    if (!safeText(sourceId)) return null;
+    return {
+      version: 1,
+      sessionId,
+      generation: eventGeneration,
+      sequence: eventSequence,
+      source: { id: sourceId },
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** A ready event grants no authority; it only asks current producers to replay and advertises passive UI capabilities. */
 export interface PresenceReady { version: 1; sessionId: string; consumer?: { id: string; capabilities: string[] }; }
 export function parsePresenceReady(value: unknown): PresenceReady | null {
@@ -168,6 +212,25 @@ export class PresenceEventRegistry {
     this.fenceBySource.set(event.source.id, { generation: event.generation, sequence: event.sequence });
     this.values.set(event.source.id, event);
     return true;
+  }
+  acceptRemove(candidate: unknown): PresenceRemoveResult {
+    const event = parsePresenceRemove(candidate);
+    return event === null ? { accepted: false } : this.acceptParsedRemove(event);
+  }
+  acceptParsedRemove(event: PresenceRemove): PresenceRemoveResult {
+    if (event.sessionId !== this.sessionId
+      || event.source.id === "pi"
+      || event.source.id === "pi-todo") return { accepted: false };
+    const previous = this.fenceBySource.get(event.source.id);
+    if (!previous
+      || event.generation < previous.generation
+      || (event.generation === previous.generation && event.sequence <= previous.sequence)) {
+      return { accepted: false };
+    }
+    const removed = this.values.get(event.source.id);
+    this.fenceBySource.set(event.source.id, { generation: event.generation, sequence: event.sequence });
+    this.values.delete(event.source.id);
+    return { accepted: true, ...(removed ? { removed } : {}) };
   }
   snapshot(): PresenceUpdate[] { return [...this.values.values()].sort((left, right) => left.source.label.localeCompare(right.source.label)); }
 }

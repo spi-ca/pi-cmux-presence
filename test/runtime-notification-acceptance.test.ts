@@ -171,7 +171,7 @@ class ManualRuntimeClock {
   }
 }
 
-test("exact pi-subagent producer-shaped no-attention fixtures never create native attention", async () => {
+test("exact pi-subagent ordinary, detached-like, cancellation, and replay fixtures never create native attention", async () => {
   const socket = await fixture();
   try {
     const pi = fakePi();
@@ -180,14 +180,15 @@ test("exact pi-subagent producer-shaped no-attention fixtures never create nativ
     await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
 
     // These are bounded, static fixtures of the public producer wire shape:
-    // ordinary state, foreground-like completion, promoted/detached-like
-    // completion, cancellation, and a ready replay all carry attention:none.
+    // ordinary state, promoted/detached-like state, cancellation, and a ready
+    // replay all carry attention:none. Foreground terminals now request the
+    // same attention as background terminals and are covered with parent merge below.
     const fixtures = [
       producerUpdate(sessionId, 1),
-      producerUpdate(sessionId, 2, { state: "success", counts: { active: 0, completed: 1, failed: 0 } }),
-      producerUpdate(sessionId, 3, { state: "success", counts: { active: 0, completed: 2, failed: 0, total: 2 } }),
-      producerUpdate(sessionId, 4, { state: "cancelled", counts: { active: 0, completed: 2, failed: 0, cancelled: 1, total: 3 } }),
-      producerUpdate(sessionId, 5, { state: "cancelled", counts: { active: 0, completed: 2, failed: 0, cancelled: 1, total: 3 } }),
+      producerUpdate(sessionId, 2, { state: "running", counts: { active: 1, completed: 0, failed: 0, total: 1 } }),
+      producerUpdate(sessionId, 3),
+      producerUpdate(sessionId, 4, { state: "cancelled", counts: { active: 0, completed: 0, failed: 0, cancelled: 1, total: 1 } }),
+      producerUpdate(sessionId, 5, { state: "cancelled", counts: { active: 0, completed: 0, failed: 0, cancelled: 1, total: 1 } }),
     ];
     for (const update of fixtures) runtime.handlePresenceUpdate(update);
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
@@ -225,7 +226,7 @@ test("three successful child deltas form one count-aware burst; cancellations st
   }
 });
 
-test("a running parent holds three successful child deltas until settlement and emits one combined notification", async () => {
+test("foreground success attention is held by its running parent until settlement and emits one combined notification", async () => {
   const socket = await fixture();
   try {
     const pi = fakePi();
@@ -253,7 +254,7 @@ test("a running parent holds three successful child deltas until settlement and 
   }
 });
 
-test("active-parent error max-wait is deterministic and dispatches exactly one static alert and flash", async () => {
+test("foreground error attention uses the active-parent max-wait and dispatches exactly one static alert and flash", async () => {
   const socket = await fixture();
   try {
     const clock = new ManualRuntimeClock();

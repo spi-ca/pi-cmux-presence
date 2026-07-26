@@ -1,10 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { PI_PRESENCE_READY_EVENT, PI_PRESENCE_UPDATE_EVENT } from "./events.js";
+import { PI_PRESENCE_READY_EVENT, PI_PRESENCE_REMOVE_EVENT, PI_PRESENCE_UPDATE_EVENT } from "./events.js";
 import type { PresenceRuntime } from "./runtime.js";
 
 /** Register Pi and process-local observers without owning mutable presence state. */
 export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime): void {
   pi.events.on(PI_PRESENCE_UPDATE_EVENT, (payload) => runtime.handlePresenceUpdate(payload));
+  pi.events.on(PI_PRESENCE_REMOVE_EVENT, (payload) => runtime.handlePresenceRemove(payload));
   pi.events.on(PI_PRESENCE_READY_EVENT, (payload) => runtime.handleReady(payload));
 
   let settleOnAgentEnd = false;

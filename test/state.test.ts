@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_COUNT, PresenceEventRegistry, parsePresenceReady, parsePresenceUpdate } from "../src/events.js";
+import { MAX_COUNT, PresenceEventRegistry, parsePresenceReady, parsePresenceRemove, parsePresenceUpdate } from "../src/events.js";
 import { TodoProgressAdapter } from "../src/todo.js";
 import { readCmuxIdentity } from "../src/identity.js";
 import { presenceStatusKey } from "../src/presence.js";
@@ -43,6 +43,61 @@ describe("generic presence event state", () => {
     expect(parsePresenceUpdate({ ...base, usage: { tokens: 1, extra: true } })).toBeNull();
     expect(parsePresenceUpdate(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
     expect(parsePresenceUpdate({ ...base, source: new Proxy(base.source, { get() { throw new Error("nope"); } }) })).toBeNull();
+  });
+  test("strictly parses remove envelopes as a total function", () => {
+    const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
+    expect(parsePresenceRemove(remove)).toEqual(remove);
+    expect(parsePresenceRemove({ ...remove, version: 2 })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, state: "running" })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, source: { ...remove.source, label: "no" } })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, source: { id: "" } })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, source: { id: "bad\u0085" } })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, source: { id: "bad\u202e" } })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, generation: -1 })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, generation: Number.MAX_SAFE_INTEGER + 1 })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, sequence: 0 })).toBeNull();
+    expect(parsePresenceRemove({ ...remove, sequence: Number.MAX_SAFE_INTEGER + 1 })).toBeNull();
+    expect(parsePresenceRemove(Object.create(null))).toBeNull();
+    expect(parsePresenceRemove(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
+    expect(parsePresenceRemove({ ...remove, source: new Proxy(remove.source, { get() { throw new Error("nope"); } }) })).toBeNull();
+  });
+  test("shares update/remove ordering and retains removal tombstone fences", () => {
+    const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
+    const registry = new PresenceEventRegistry();
+    registry.start(sessionId);
+    expect(registry.acceptRemove(remove)).toEqual({ accepted: false });
+    expect(registry.accept(base)).toBe(true);
+    expect(registry.acceptRemove({ ...remove, sessionId: "other-session" })).toEqual({ accepted: false });
+    expect(registry.accept({ ...base, source: { id: "pi", label: "Pi", kind: "agent" } })).toBe(true);
+    expect(registry.accept({ ...base, source: { id: "pi-todo", label: "Todo", kind: "task" } })).toBe(true);
+    expect(registry.acceptRemove({ ...remove, source: { id: "pi" } })).toEqual({ accepted: false });
+    expect(registry.acceptRemove({ ...remove, source: { id: "pi-todo" } })).toEqual({ accepted: false });
+    expect(registry.snapshot().map((event) => event.source.id)).toEqual(expect.arrayContaining(["pi", "pi-todo"]));
+    expect(registry.acceptRemove(remove)).toMatchObject({ accepted: true, removed: base });
+    expect(registry.snapshot().map((event) => event.source.id)).toEqual(expect.arrayContaining(["pi", "pi-todo"]));
+    expect(registry.snapshot().some((event) => event.source.id === "worker")).toBe(false);
+    expect(registry.accept({ ...base, sequence: 1 })).toBe(false);
+    expect(registry.accept({ ...base, sequence: 2 })).toBe(false);
+    expect(registry.accept({ ...base, sequence: 3 })).toBe(true);
+    expect(registry.acceptRemove({ ...remove, generation: 0, sequence: 99 })).toEqual({ accepted: false });
+    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 1 }).accepted).toBe(true);
+    expect(registry.accept({ ...base, generation: 2, sequence: 1 })).toBe(false);
+    expect(registry.accept({ ...base, generation: 2, sequence: 2 })).toBe(true);
+    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 3 }).accepted).toBe(true);
+    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 4 })).toEqual({ accepted: true });
+    expect(registry.accept({ ...base, generation: 3, sequence: 1 })).toBe(true);
+
+    const other = { ...base, sequence: 1, source: { id: "other", label: "Other", kind: "task" } };
+    expect(registry.accept(other)).toBe(true);
+    expect(registry.snapshot().map((event) => event.source.id)).toContain("other");
+
+    const fenced = new PresenceEventRegistry();
+    fenced.start(sessionId);
+    for (let index = 0; index < 64; index += 1) {
+      expect(fenced.accept({ ...base, source: { id: `source-${index}`, label: `Source ${index}`, kind: "task" } })).toBe(true);
+    }
+    expect(fenced.acceptRemove({ ...remove, source: { id: "source-0" } }).accepted).toBe(true);
+    expect(fenced.accept({ ...base, source: { id: "source-64", label: "Source 64", kind: "task" } })).toBe(false);
   });
   test("uses fixed-length SHA-256 status keys for maximum-length source IDs", () => {
     const key = presenceStatusKey("x".repeat(96));

@@ -24,7 +24,7 @@ bun pm pack --dry-run
 index.ts                  — 안정적인 Pi 확장 진입점, package.json의 pi.extensions가 참조
 src/client.ts             — capability-gated V2와 설정-gated V1 cmux 쓰기, resume ownership 확인
 src/config.ts             — public 환경 변수, 기본값, 범위
-src/events.ts             — update/ready contract, session/source fence와 retained state
+src/events.ts             — update/remove/ready contract, 공유 source fence·tombstone과 retained state
 src/hooks.ts              — Pi lifecycle과 process-local event observer 등록
 src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로
 src/notification-policy.ts — exact `pi-subagent` 누적 terminal·attention/flash policy 판정
@@ -75,7 +75,7 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 state를 추가하면 style·priority와 event validator를 함께 갱신합니다.
-- `pi`와 `pi-todo`는 예약 source입니다. generic update/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다. `pi-subagent`는 예약은 아니지만 exact source ID의 attention에만 cumulative terminal policy가 적용되므로 label/kind 기반 special case를 추가하지 않습니다.
+- `pi`와 `pi-todo`는 예약 source입니다. generic update/remove/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다. update/remove는 같은 source fence를 공유하고 remove 뒤 tombstone을 유지해야 합니다. `pi-subagent`는 예약은 아니지만 exact source ID의 attention과 remove invalidation에만 cumulative terminal policy가 적용되므로 label/kind 기반 special case를 추가하지 않습니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
 - 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
@@ -86,14 +86,14 @@ bun run diagram:render
 
 ## 검증 범위
 
-`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값, `settled` trim/case 포함), V1/V2 codec과 multibyte 경계, capability gate, event/ready contract, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, `settled` policy matrix, canonical local presentation의 static/no-payload byte bound, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
+`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값, `settled` trim/case 포함), V1/V2 codec과 multibyte 경계, capability gate, update/remove/ready contract와 shared-fence tombstone, remove의 exact status clear·progress/meta 재계산·attention silence, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, `settled` policy matrix, canonical local presentation의 static/no-payload byte bound, 전체 todo ID 고유성, status state, invalid session fail-closed, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
 
 이 검증은 consumer 쪽 generic producer shape, 검토한 exact child-profile suppression, fake Unix socket과 정적 status-key namespace까지만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 연동은 검증하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
 
 ## 관련 문서
 
 - [`configuration.md`](configuration.md) — 환경 변수, capability negotiation, socket/identity 조건과 opt-in 개인정보 범위
-- [`event-contract.md`](event-contract.md) — `pi-presence:update:v1` generic producer 계약, ready replay, todo progress 규칙
+- [`event-contract.md`](event-contract.md) — `pi-presence:update:v1`·`remove:v1` generic producer 계약, ready replay, todo progress 규칙
 - [`feature-ownership.md`](feature-ownership.md) — `pi-cmux-presence`/`pi-subagent`/공식 cmux hook의 기능 경계와 `pi-cmux` 비교표
 - [`pi-subagent-integration.md`](pi-subagent-integration.md) — `pi-subagent` generic producer 연동 계약과 lifecycle authority 경계
 

@@ -5,6 +5,7 @@ import {
   PI_PRESENCE_READY_EVENT,
   PI_PRESENCE_UPDATE_EVENT,
   parsePresenceReady,
+  parsePresenceRemove,
   parsePresenceSessionId,
   parsePresenceUpdate,
   PresenceEventRegistry,
@@ -157,6 +158,30 @@ export class PresenceRuntime {
         return;
       }
       this.apply(event);
+    } catch {
+      // Untrusted event-bus input is always best-effort.
+    }
+  }
+
+  handlePresenceRemove(payload: unknown): void {
+    try {
+      const event = parsePresenceRemove(payload);
+      if (!event || event.source.id === LOCAL_SOURCE.id || event.source.id === TODO_SOURCE) return;
+      const result = this.registry.acceptParsedRemove(event);
+      if (!result.accepted) return;
+
+      // Removal has no producer-controlled presentation or attention. It only
+      // withdraws the exact status the registry previously accepted.
+      if (event.source.id === PI_SUBAGENT_SOURCE_ID) {
+        this.invalidateSubagentNotifications();
+      }
+      if (result.removed) {
+        void this.client?.clearStatus(this.statusKey(event.source.id));
+      }
+      this.renderProgress();
+      if (!this.officialHook && this.config.metaBlock) {
+        void this.client?.meta(this.metadata());
+      }
     } catch {
       // Untrusted event-bus input is always best-effort.
     }
@@ -825,6 +850,19 @@ export class PresenceRuntime {
     this.suppressedParentAttention = null;
   }
 
+  /** A pi-subagent removal invalidates its cumulative baseline and pending burst. */
+  private invalidateSubagentNotifications(): void {
+    const invalidated = this.subagentPending;
+    this.clearSubagentTimer();
+    this.subagentPending = null;
+    this.subagentBaseline = null;
+    // A deferred local terminal must not be lost when the child producer
+    // retracts the aggregate that had temporarily claimed it.
+    if (invalidated && invalidated.parentSettled !== null) {
+      this.dispatchSuppressedParentAttention(invalidated.parentRun);
+    }
+  }
+
   private renderProgress(): void {
     const next = selectProgress(this.registry.snapshot());
     if (!next) {
@@ -877,7 +915,7 @@ export class PresenceRuntime {
         sessionId,
         consumer: {
           id: "pi-cmux-presence",
-          capabilities: ["cmux-status", "cmux-progress", "cmux-attention"],
+          capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"],
         },
       });
     } catch {

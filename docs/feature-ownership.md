@@ -10,22 +10,22 @@
 | --- | --- | --- | --- |
 | 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 fixed local summary로 surface status를 표시 | 관여하지 않음 | idle `agent_settled`에서 최종화; assistant body/prompt/path/tool content는 표시하지 않음 |
 | todo 진행률 | 검증한 `todo` 결과에서 count와 `completed/visible`만 계산 | 관여하지 않음 | task 텍스트는 전송하지 않음 |
-| subagent 상태 | generic update를 검증해 status/progress로 렌더링. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계 | 원하면 `pi-presence:update:v1`으로 검증 가능한 summary를 발행 | package dependency 없음; label/kind는 special routing 조건이 아님 |
+| subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 원하면 `pi-presence:update:v1` summary와 capability-gated `pi-presence:remove:v1`을 발행 | package dependency 없음; label/kind는 special routing 조건이 아님 |
 | root aggregate·child `inherit` | 관여하지 않음; 로드된 경우 수락한 event만 observer로 표시 | root aggregate 소유와 `inherit` child 정책은 producer가 결정 | consumer는 이를 의존·조정·두 package load-order로 검증하지 않음; extension이 없으면 이 consumer 동작도 없음 |
 | subagent 실행·취소·결과 | 관여하지 않음 | 실행 패키지가 authority를 유지 | scheduler, lease, reaper, cleanup 등의 실제 범위는 외부 구현의 계약 |
 | cmux 상태 스타일 | state별 고정 icon/color/priority, surface-scoped key | cmux 직접 mutation을 요구하지 않음 | V1 socket |
 | cmux progress | todo-first deterministic 단일 슬롯 중재; flag가 꺼지면 초기·종료 clear도 생략 | 실제로 보유한 determinate progress만 선택 발행 가능 | cmux workspace당 progress 슬롯 하나 |
-| 알림·flash·log | official hook 우선 뒤 channel suppression·레거시 kill switch·policy·capability로 게이팅; exact `pi-subagent` terminal은 의미적으로 한 번만 집계 | 필요한 경우 실제 background terminal summary만 발행 가능 | `settled`는 local success/error와 external error만 notification; replay/cancel/handoff는 `attention: "none"`; 성공 flash는 기본 비활성 |
+| 알림·flash·log | official hook 우선 뒤 channel suppression·레거시 kill switch·policy·capability로 게이팅; exact `pi-subagent` terminal은 의미적으로 한 번만 집계 | foreground/background terminal summary를 동일하게 발행 가능 | `settled`는 local success/error와 external error만 notification; terminal success는 parent settlement와 병합; replay/cancel/handoff는 `attention: "none"`; 성공 flash는 기본 비활성 |
 | Pi PID/lifecycle | 공식 hook 부재 시 기본 활성 fallback | 관여하지 않음 | generic event가 PID/lifecycle command를 만들 수 없음 |
 | Feed | 공식 hook 부재 시 opt-in privacy-minimal fallback | Feed 직접 호출을 요구하지 않음 | prompt/input/output/path 제외 |
 | metadata block | opt-in 숫자 집계 | 숫자 summary를 event에 포함할 수 있음 | producer text 제외 |
 | workspace title | opt-in Pi session name | 관여하지 않음 | 공식 hook 우선 |
 | session resume | opt-in, 소유 확인한 exact binding fallback | subagent session resume authority를 이전하지 않음 | 공식 cmux Pi hook 우선 |
-| ready/replay | consumer capability를 광고하고 local/todo를 재발행 | matching ready에 retained summary를 새 sequence로 재발행할 수 있음 | 실행 authority가 아닌 protocol 수준의 load-order 보정이며 두 package load-order test는 아님 |
+| ready/replay | consumer capability와 `presence-remove-v1` 지원을 광고하고 local/todo를 재발행 | matching ready에 retained summary를 새 sequence와 `attention: "none"`으로 재발행할 수 있음 | 실행 authority가 아닌 protocol 수준의 load-order 보정이며 두 package load-order test는 아님 |
 
 ## 유연한 연동 원칙
 
-- 공통 채널은 `pi-presence:update:v1`과 `pi-presence:ready:v1`입니다.
+- 공통 채널은 `pi-presence:update:v1`, `pi-presence:remove:v1`, `pi-presence:ready:v1`입니다.
 - wire DTO는 두 저장소에 의도적으로 중복 선언합니다. 런타임 package dependency나 shared lifecycle 모듈을 만들지 않습니다.
 - `ready.consumer`는 UI capability 힌트이며 인증·명령 채널이 아닙니다.
 - `pi-cmux-presence`는 모든 source에 generic update 검증을 적용하고 `pi`·`pi-todo`는 local source로 예약합니다. 단, 정확한 `source.id: "pi-subagent"`의 **attention**만 누적 count·parent settlement 기반 special policy를 사용합니다. 다른 ID와 `source.label`/`source.kind`에는 적용하지 않습니다.

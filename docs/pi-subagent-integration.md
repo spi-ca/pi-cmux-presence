@@ -2,7 +2,7 @@
 
 ## 범위와 의존성
 
-`pi-cmux-presence`는 `pi-subagent`를 import하거나 dependency로 선언하지 않습니다. `pi-subagent`가 같은 Pi 프로세스 event bus에서 [`pi-presence:update:v1`](event-contract.md)을 발행하는 경우에만 이 consumer가 선택적으로 summary를 렌더링합니다. 따라서 이 문서는 외부 패키지의 설치, production entrypoint, 실행 방식 또는 현재 구현 parity를 보장하지 않습니다.
+`pi-cmux-presence`는 `pi-subagent`를 import하거나 dependency로 선언하지 않습니다. `pi-subagent`가 같은 Pi 프로세스 event bus에서 [`pi-presence:update:v1`](event-contract.md)을 발행하는 경우에만 이 consumer가 선택적으로 summary를 렌더링하며, `pi-presence:remove:v1`으로 그 retained summary를 철회할 수 있습니다. 따라서 이 문서는 외부 패키지의 설치, production entrypoint, 실행 방식 또는 현재 구현 parity를 보장하지 않습니다.
 
 일반 producer는 현재 `sessionId`, 자신이 소유한 `generation`·단조 증가 `sequence`, 비예약 `source.id`, state/count를 넣어 발행합니다. `pi`와 `pi-todo`는 예약 source라 외부 입력으로 수락되지 않습니다. `pi-subagent` 연동에 사용할 source ID는 정확히 `"pi-subagent"`입니다. label과 kind는 표시용 safe text일 뿐 routing authority가 아니며, `"pi-subagent"`와 비슷한 다른 ID에는 아래의 special attention 정책이 적용되지 않습니다.
 
@@ -31,7 +31,7 @@ root aggregate와 child `inherit` 같은 실행·집계 규칙은 producer 쪽�
 
 `completed`·`failed`·`cancelled`은 generation 안에서 누적 단조 증가시키는 summary입니다. `total`이 `0`이면 progress를 생략합니다. consumer는 count 간 산술 관계와 상세 progress를 추정하지 않습니다. task 제목·설명, prompt, output, cwd, credential, private target ID는 넣지 마세요. label은 형식·길이만 검증·축약되며 의미 기반 redaction은 하지 않습니다.
 
-`attention`은 background 관찰용 요약 신호입니다. `background` notification policy는 cmux focus나 실제 foreground/background 상태를 판별하지 않습니다. producer의 취소, foreground 전환, parent handoff 또는 ready replay는 attention이 아니며 `attention: "none"`을 사용합니다. 특히 cancellation은 status-only이므로 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log가 되지 않습니다. matching ready에 대한 replay는 새 sequence와 `attention: "none"`으로 현재 summary만 다시 발행합니다.
+`attention`은 terminal 관찰용 요약 신호입니다. foreground/background invocation 모두 완료하면 `success`, 실패하면 `error`를 사용하며, consumer는 부모 Pi lifecycle과 이 신호를 병합해 child 완료를 전체 응답 완료로 조기에 표시하지 않습니다. `background` notification policy는 cmux focus나 실제 foreground/background 상태를 판별하지 않습니다. producer의 취소, foreground 전환, parent handoff 또는 ready replay는 attention이 아니며 `attention: "none"`을 사용합니다. 특히 cancellation은 status-only이므로 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log가 되지 않습니다. matching ready에 대한 replay는 새 sequence와 `attention: "none"`으로 현재 summary만 다시 발행합니다.
 
 ## exact source의 terminal attention
 
@@ -58,7 +58,7 @@ root aggregate와 child `inherit` 같은 실행·집계 규칙은 producer 쪽�
 
 ## ready, authority 및 실패 격리
 
-consumer는 session start 뒤 `pi-presence:ready:v1`으로 `cmux-status`, `cmux-progress`, `cmux-attention` capability를 광고합니다. 이는 재발행 요청과 UI 힌트일 뿐 실행 권한을 주지 않습니다. matching `sessionId`의 ready를 받은 producer는 retained summary를 새 sequence 및 `attention: "none"`으로 replay할 수 있습니다.
+consumer는 session start 뒤 `pi-presence:ready:v1`으로 `cmux-status`, `cmux-progress`, `cmux-attention`, `presence-remove-v1` capability를 광고합니다. 이는 재발행 요청과 UI 힌트일 뿐 실행 권한을 주지 않습니다. matching `sessionId`의 ready를 받은 producer는 retained summary를 새 sequence 및 `attention: "none"`으로 replay할 수 있습니다. `presence-remove-v1`을 확인한 producer가 더 높은 sequence로 exact `pi-subagent` source를 remove하면 consumer는 retained status와 누적 baseline·pending terminal timer·parent association을 무효화합니다. 단, child aggregate가 보류 중이던 local parent attention은 조용히 유실하지 않고 기존 fallback policy를 적용합니다.
 
 이 연동은 observer-only입니다. `pi-cmux-presence`는 다음을 하지 않으며 producer가 요청해서도 안 됩니다.
 

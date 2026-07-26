@@ -1,6 +1,6 @@
-# `pi-presence:update:v1` 이벤트 계약
+# `pi-presence:update:v1`·`pi-presence:remove:v1` 이벤트 계약
 
-이 채널은 같은 Pi 프로세스 event bus의 선택적 presence 입력입니다. durable transport나 cross-process API가 아니며 reload/세션 종료 후 생산자는 필요하면 현재 상태를 다시 발행해야 합니다.
+이 채널은 같은 Pi 프로세스 event bus의 선택적 presence 입력입니다. `update`는 상태를 기록하고 consumer-side `remove`는 이미 수락된 외부 source의 retained 상태를 철회합니다. durable transport나 cross-process API가 아니며 reload/세션 종료 후 생산자는 필요하면 현재 상태를 다시 발행해야 합니다.
 
 ![ready 광고부터 엄격한 update 검증, retained 상태 렌더링과 session teardown까지의 이벤트 흐름](diagram/event-flow.svg)
 
@@ -46,13 +46,38 @@ payload와 중첩 객체에는 다음 키 외의 키를 넣을 수 없습니다.
 
 가산 count는 기존 필수 count의 의미를 바꾸지 않습니다. 예를 들어 `waiting`은 producer가 대기 중임을 표현할 수 있고, `queued`·`cancelled`·`total`은 상태 문자열·meta 집계에 선택적으로 반영됩니다. consumer는 이 수치들 사이의 산술 관계를 강제하지 않습니다.
 
+## 엄격한 V1 remove 객체
+
+`pi-presence:remove:v1` payload와 `source` 중첩 객체는 아래 키만 정확히 허용합니다. `source.id`와 `sessionId`는 update와 같은 1–96 Unicode code points safe text 규칙(C0/C1 control 및 bidi·방향성 제어 문자 금지)을 따릅니다. plain object가 아니거나 getter/proxy 접근 중 예외가 발생하는 입력은 거부하며 parser는 예외를 외부로 전파하지 않습니다. remove에는 label, kind, state, count, progress, usage 또는 attention처럼 producer가 표시나 attention을 제어할 수 있는 필드가 없습니다.
+
+```ts
+{
+  version: 1,
+  sessionId: string,
+  generation: number,
+  sequence: number,
+  source: { id: string },
+}
+```
+
+| 필드 | 조건 |
+| --- | --- |
+| `version` | 정확히 `1` |
+| `generation` | update와 같음: 안전한 정수 0–`Number.MAX_SAFE_INTEGER` |
+| `sequence` | update와 같음: 안전한 정수 1–`Number.MAX_SAFE_INTEGER` |
+| `source` | 정확히 `id`만 가지며, 추가 키를 허용하지 않음 |
+
 ## 순서, 예약 source, 신뢰 경계
 
-consumer는 host가 제공한 session ID도 같은 1–96 Unicode code points safe text 규칙으로 먼저 검증합니다. 누락·조회 오류·범위 위반이면 lifecycle handler에서 예외를 전파하지 않고 해당 presence 세션을 fail-closed로 비활성화합니다. consumer는 현재 세션과 다른 `sessionId`를 무시합니다. source별 마지막 `(generation, sequence)`를 저장하며 낮은 generation 또는 같은 generation의 같거나 낮은 sequence를 거부합니다. 높은 generation은 그 source의 sequence fence만 다시 시작합니다. generation은 consumer가 아닌 producer가 소유합니다. 세션당 서로 다른 source는 최대 64개입니다.
+consumer는 host가 제공한 session ID도 같은 1–96 Unicode code points safe text 규칙으로 먼저 검증합니다. 누락·조회 오류·범위 위반이면 lifecycle handler에서 예외를 전파하지 않고 해당 presence 세션을 fail-closed로 비활성화합니다. consumer는 현재 세션과 다른 `sessionId`를 무시합니다. update와 remove는 source별 마지막 `(generation, sequence)` fence를 **공유**합니다. 낮은 generation 또는 같은 generation의 같거나 낮은 sequence를 거부하고, 높은 generation은 그 source의 sequence fence만 다시 시작합니다. generation은 consumer가 아닌 producer가 소유합니다. 세션당 서로 다른 source는 최대 64개이며, remove가 source를 새로 만들지는 않습니다.
 
-`source.id: "pi"`는 내장 Pi lifecycle producer, `source.id: "pi-todo"`는 내장 todo adapter의 예약값입니다. 외부 event bus payload가 이 둘을 쓰면 무시됩니다. payload는 신뢰할 수 없는 구조화 입력으로 파싱·키·범위 검사를 통과해야 합니다. 생산자는 label, 수치와 attention에 비밀 또는 신뢰할 수 없는 원문을 넣지 않아야 합니다. consumer의 label 처리는 구조·control/bidi·길이 검증과 목적지별 축약이지 의미 기반 redaction이 아닙니다.
+`source.id: "pi"`는 내장 Pi lifecycle producer, `source.id: "pi-todo"`는 내장 todo adapter의 예약값입니다. 외부 event bus payload가 이 둘을 쓰면 무시됩니다. 특히 remove는 이 예약 source를 철회할 수 없습니다. payload는 신뢰할 수 없는 구조화 입력으로 파싱·키·범위 검사를 통과해야 합니다. 생산자는 label, 수치와 attention에 비밀 또는 신뢰할 수 없는 원문을 넣지 않아야 합니다. consumer의 label 처리는 구조·control/bidi·길이 검증과 목적지별 축약이지 의미 기반 redaction이 아닙니다.
 
-수락된 update는 해당 `source.id`의 retained 상태를 **대체**합니다. V1에는 외부 source를 명시적으로 삭제하는 이벤트가 없습니다. 따라서 외부 producer가 terminal update를 발행해도 그 source의 마지막 상태는 session teardown까지 retained될 수 있습니다. 새 세션 시작 또는 session shutdown의 teardown은 retained source의 소유 status를 정리합니다.
+수락된 update는 해당 `source.id`의 retained 상태를 **대체**합니다. remove는 먼저 같은 source에 이미 fence가 있는지 확인하므로 unknown source의 remove는 거부합니다. 유효한 remove는 retained 상태가 있으면 그 상태만 삭제하고 `(generation, sequence)` fence는 tombstone으로 남깁니다. 따라서 삭제 뒤에는 더 높은 update만 source를 다시 활성화할 수 있습니다. tombstone을 향한 더 높은 유효 remove도 fence를 전진시킨 채 수락되지만, 삭제할 retained 상태가 없으므로 physical status clear는 보내지 않습니다. 반대로 retained 상태를 실제로 철회한 경우에만 그 source의 정확한 status key를 clear합니다. 새 세션 시작 또는 session shutdown의 teardown은 retained source의 소유 status를 정리합니다.
+
+수락된 remove는 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block도 다시 계산합니다. remove 자체는 generic `log`, notification, flash 또는 feed를 새로 만들지 않으며, 이미 만든 notification의 보존·dismiss는 계속 cmux 소유입니다. 정확한 `source.id: "pi-subagent"` remove는 누적 terminal baseline과 보류 burst를 무효화합니다. 그 burst 때문에 보류된 local parent attention이 있으면 producer payload를 복사하지 않는 local fallback을 기존 policy·capability gate로 처리합니다.
+
+이 저장소는 consumer만 제공합니다. transient producer는 matching ready의 `presence-remove-v1` capability를 확인한 뒤에만 최초 retained update를 발행하고, 정상 답변·취소·abort·예외·shutdown의 종료 경로에서 더 높은 sequence로 remove하는 것이 안전합니다. 열린 상태를 matching ready에 replay할 때는 새 sequence와 `attention: "none"`을 사용해야 하며, 이미 끝났다면 replay하지 않습니다. 동시 요청은 고정 source 하나에 `active`·`queued` count로 집계하고 마지막 요청이 끝날 때만 remove하는 방식을 권장합니다. prompt, 선택지, 답변, tool call ID, 경로, credential 또는 raw error는 update/remove에 넣지 않아야 합니다. 이 producer lifecycle은 외부 producer의 책임이며 이 저장소에 ask-user producer 구현이나 그 lifecycle 검증이 있다고 주장하지 않습니다. remove를 모르는 이전 consumer는 event를 구독하지 않아 무시할 수 있고, remove를 발행하지 않는 이전 producer의 마지막 update는 기존처럼 session teardown까지 retained됩니다.
 
 ## progress 선택과 상태 표시
 
@@ -75,7 +100,7 @@ cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress�
 
 공식 cmux hook이 우선할 때 이 exact source의 버퍼된 success는 native notification/flash로 보내지 않습니다(설정한 log는 가능). error 집계는 정책과 capability가 허용하면 한 번 계속 보냅니다. hook 감지는 비동기이지만 session epoch와 session ID로 fence하므로, 이전 세션의 지연된 probe 결과가 현재 세션의 precedence를 바꾸지 않습니다. 다른 외부 source에는 이 special policy를 적용하지 않습니다.
 
-`PI_CMUX_PRESENCE_FINAL_CLEAR_MS`는 내장 `pi` source의 `agent_settled` 뒤 최종 status를 지우기까지의 대기 시간만 제어합니다. 이 타이머는 외부 source의 retained 상태를 지우지 않으며, 외부 상태는 위의 session teardown까지 남을 수 있습니다.
+`PI_CMUX_PRESENCE_FINAL_CLEAR_MS`는 내장 `pi` source의 `agent_settled` 뒤 최종 status를 지우기까지의 대기 시간만 제어합니다. 이 타이머는 외부 source의 retained 상태를 지우지 않으며, 외부 상태는 수락된 remove 또는 session teardown까지 남을 수 있습니다.
 
 ## ready 광고와 재발행
 
@@ -92,7 +117,7 @@ consumer는 session 시작 뒤 `pi-presence:ready:v1`을 발행합니다.
 }
 ```
 
-현재 consumer advertisement는 `id: "pi-cmux-presence"`, capabilities `cmux-status`, `cmux-progress`, `cmux-attention`입니다. ready는 capability 힌트와 재발행 요청일 뿐 authority를 위임하지 않습니다. 내장 `pi`와 `pi-todo`는 matching session ready를 받으면 retained state를 새 sequence 및 `attention: "none"`으로 replay합니다. 일반 producer도 필요하면 자신의 상태를 새 sequence로 재발행할 수 있습니다. replay는 현재 status를 복원할 뿐 과거 성공·error를 다시 notification/flash하지 않습니다.
+현재 consumer advertisement는 `id: "pi-cmux-presence"`, capabilities `cmux-status`, `cmux-progress`, `cmux-attention`, `presence-remove-v1`입니다. ready는 capability 힌트와 재발행 요청일 뿐 authority를 위임하지 않습니다. 내장 `pi`와 `pi-todo`는 matching session ready를 받으면 retained state를 새 sequence 및 `attention: "none"`으로 replay합니다. 일반 producer도 필요하면 자신의 상태를 새 sequence로 재발행할 수 있습니다. replay는 현재 status를 복원할 뿐 과거 성공·error를 다시 notification/flash하지 않습니다.
 
 ## RPIV todo 진행률
 

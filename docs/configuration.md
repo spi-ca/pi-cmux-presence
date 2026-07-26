@@ -71,6 +71,14 @@ notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 
 
 native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|idle`을 해당 `--panel=<CMUX_SURFACE_ID>`에 보냅니다. `idle`은 cmux에 유휴 상태를 알리는 신호이며, 이 확장이 hibernate/resume을 수행하거나 실행 lifecycle authority를 갖는 것은 아닙니다. 공식 cmux hook precedence가 적용되면 이 native lifecycle도 보내지 않습니다(아래 "identity·소켓과 공식 hook 우선순위" 참고).
 
+### consumer-side `pi-presence:remove:v1`
+
+이 event에는 별도 환경 변수가 없습니다. consumer는 ready `capabilities`에 `presence-remove-v1`을 광고하며, 수락된 외부 remove가 실제 retained 상태를 철회했을 때만 그 source의 status를 clear합니다. 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block을 다시 계산합니다. tombstone을 향한 더 높은 remove는 수락되어 fence만 전진시키므로 status clear를 만들지 않습니다.
+
+remove는 `PI_CMUX_PRESENCE_LOG`, notification 정책, flash 정책, `PI_CMUX_PRESENCE_FEED`와 무관하게 새 generic log·notification·flash·feed를 만들지 않습니다. 이미 만든 notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다. 정확한 `pi-subagent` source의 remove는 보류된 child terminal 상태를 무효화하며, 그 상태가 보류했던 local parent attention은 기존 notification/flash policy와 capability gate를 적용한 local fallback으로만 처리할 수 있습니다.
+
+payload의 정확한 키, 공유 generation/sequence fence, reserved source와 이전 consumer/producer 호환성은 [`event-contract.md`](event-contract.md)를 참고하세요. producer의 capability gate, ready replay, 개인정보, 동시성 및 lifecycle은 이 consumer 패키지의 설정·구현 범위 밖이며 이 저장소에는 ask-user producer가 없습니다.
+
 ## opt-in 데이터와 resume 보호
 
 `feed`는 session ID, event 이름, tool call ID·tool name과 cmux가 이미 제공한 `_source`·workspace/surface ID만 보낼 수 있습니다. `meta block`은 아홉 개의 숫자 집계만 보냅니다. `auto title`은 Pi가 제공한 session name을 보낼 수 있고, `resume fallback`은 session ID와 `pi --session '<sessionId>'`를 binding에 보냅니다. 따라서 모두 기본 비활성입니다.
