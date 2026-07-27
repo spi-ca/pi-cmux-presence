@@ -334,19 +334,192 @@ test("matching ready replays retained local state with fresh sequence and no att
   } finally { await fixture.cleanup(); }
 });
 
-test("ready advertises consumer support for presence removal", async () => {
+test("startup emits one frozen advertisement followed by one frozen replay request", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    const discovered: unknown[] = [];
+    pi.api.events.on("pi-presence:ready:v1", (payload) => { discovered.push(payload); });
+    extension(pi.api as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "remove-ready-session" } });
+    const ready = pi.emitted.filter((event) => event.name === "pi-presence:ready:v1").map((event) => event.payload);
+    expect(ready).toHaveLength(2);
+    const advertisement = ready[0] as { version: number; sessionId: string; consumer: { id: string; capabilities: string[] } };
+    expect(Object.isFrozen(advertisement)).toBe(true);
+    expect(Object.isFrozen(advertisement.consumer)).toBe(true);
+    expect(Object.isFrozen(advertisement.consumer.capabilities)).toBe(true);
+    expect(advertisement).toEqual({
+      version: 1,
+      sessionId: "remove-ready-session",
+      consumer: { id: "pi-cmux-presence", capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"] },
+    });
+    expect(ready[1]).toEqual({ version: 1, sessionId: "remove-ready-session" });
+    expect(Object.isFrozen(ready[1])).toBe(true);
+    expect(discovered).toEqual(ready);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("consumer-first ready requests receive one advertisement and retain local replay", async () => {
   const fixture = await presenceFixture();
   try {
     const pi = fakePi();
     extension(pi.api as never);
-    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => "remove-ready-session" } });
-    const ready = pi.emitted.find((event) => event.name === "pi-presence:ready:v1");
-    expect(ready?.payload).toMatchObject({
+    const sessionId = "consumer-first-session";
+    pi.tools.push({ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } });
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("tool_result", { toolName: "todo", isError: false, details: { action: "list", params: {}, nextId: 2, tasks: [{ id: 1, status: "completed" }] } });
+    const advertisements = () => pi.emitted.filter((event) => event.name === "pi-presence:ready:v1" && typeof event.payload === "object" && event.payload !== null && "consumer" in event.payload);
+    const localUpdates = () => pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi");
+    const beforeAdvertisements = advertisements().length;
+    const beforeLocalReplays = localUpdates().length;
+    const beforeTodoReplays = pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi-todo").length;
+    const beforeReplay = localUpdates().at(-1)!;
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+
+    expect(advertisements()).toHaveLength(beforeAdvertisements + 1);
+    expect(localUpdates()).toHaveLength(beforeLocalReplays + 1);
+    expect(pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi-todo")).toHaveLength(beforeTodoReplays + 1);
+    expect(advertisements().at(-1)?.payload).toEqual({
       version: 1,
-      sessionId: "remove-ready-session",
-      consumer: { id: "pi-cmux-presence", capabilities: expect.arrayContaining(["presence-remove-v1"]) },
+      sessionId,
+      consumer: {
+        id: "pi-cmux-presence",
+        capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"],
+      },
+    });
+    const replay = localUpdates().at(-1)!;
+    expect(replay.sequence).toBeGreaterThan(beforeReplay.sequence);
+    expect(replay.attention).toBe("none");
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("two simulated producers observe only requests, not consumer advertisements", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    let producerRequests = 0;
+    for (let index = 0; index < 2; index += 1) {
+      pi.api.events.on("pi-presence:ready:v1", (payload) => {
+        if (typeof payload === "object" && payload !== null && !("consumer" in payload)) producerRequests += 1;
+      });
+    }
+    extension(pi.api as never);
+    const sessionId = "two-producers-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    expect(producerRequests).toBe(2);
+    const beforeAdvertisements = pi.emitted.filter((event) => event.name === "pi-presence:ready:v1" && typeof event.payload === "object" && event.payload !== null && "consumer" in event.payload).length;
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+
+    expect(producerRequests).toBe(4);
+    expect(pi.emitted.filter((event) => event.name === "pi-presence:ready:v1" && typeof event.payload === "object" && event.payload !== null && "consumer" in event.payload)).toHaveLength(beforeAdvertisements + 1);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("consumer ready advertisements do not loop and invalid requests are fenced", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "ready-fence-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const advertisements = () => pi.emitted.filter((event) => event.name === "pi-presence:ready:v1" && typeof event.payload === "object" && event.payload !== null && "consumer" in event.payload);
+    const localUpdates = () => pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi");
+    const before = advertisements().length;
+    const beforeUpdates = localUpdates().length;
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId, consumer: { id: "other-consumer", capabilities: [] } });
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId: "stale-session" });
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId, consumer: null });
+    pi.emit("pi-presence:ready:v1", { version: 2, sessionId });
+    expect(advertisements()).toHaveLength(before);
+    expect(localUpdates()).toHaveLength(beforeUpdates);
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+    expect(advertisements()).toHaveLength(before + 2);
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("frozen ready output and nested requests cannot amplify one external request", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "ready-reentrancy-session";
+    let mutate = false;
+    pi.api.events.on("pi-presence:ready:v1", (payload) => {
+      if (!mutate || typeof payload !== "object" || payload === null || !("consumer" in payload)) return;
+      try {
+        (payload as unknown as { sessionId: string }).sessionId = "mutated";
+        ((payload as unknown as { consumer: { capabilities: string[] } }).consumer.capabilities).push("mutated");
+      } catch {
+        // Frozen outgoing payloads reject observer mutation.
+      }
+      pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+    });
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const readyEvents = () => pi.emitted.filter((event) => event.name === "pi-presence:ready:v1");
+    const localUpdates = () => pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi");
+    const beforeReady = readyEvents().length;
+    const beforeUpdates = localUpdates().length;
+    mutate = true;
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+
+    expect(readyEvents()).toHaveLength(beforeReady + 1);
+    expect(localUpdates()).toHaveLength(beforeUpdates + 1);
+    expect(readyEvents().at(-1)?.payload).toMatchObject({
+      sessionId,
+      consumer: { capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"] },
     });
     await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("ready advertisement emit failures do not interrupt retained replay", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "ready-emit-failure-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const localUpdates = () => pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).map((event) => event.payload as PresenceUpdate).filter((event) => event.source.id === "pi");
+    const before = localUpdates().at(-1)!;
+    const originalEmit = pi.api.events.emit;
+    pi.api.events.emit = (name: string, payload: unknown) => {
+      if (name === "pi-presence:ready:v1") throw new Error("observer unavailable");
+      originalEmit(name, payload);
+    };
+
+    expect(() => pi.emit("pi-presence:ready:v1", { version: 1, sessionId })).not.toThrow();
+    const replay = localUpdates().at(-1)!;
+    expect(replay.sequence).toBeGreaterThan(before.sequence);
+    expect(replay.attention).toBe("none");
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("ready requests after shutdown produce no advertisement or local replay", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "ready-shutdown-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("session_shutdown");
+    const beforeReady = pi.emitted.filter((event) => event.name === "pi-presence:ready:v1").length;
+    const beforeUpdates = pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).length;
+
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+
+    expect(pi.emitted.filter((event) => event.name === "pi-presence:ready:v1")).toHaveLength(beforeReady);
+    expect(pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)).toHaveLength(beforeUpdates);
   } finally { await fixture.cleanup(); }
 });
 

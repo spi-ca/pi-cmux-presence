@@ -140,6 +140,11 @@ export class PresenceRuntime {
   private suppressedParentAttention: SuppressedParentAttention | null = null;
   private officialHook = false;
   private statusScope: string | undefined;
+  /** Exact synchronous identities prevent this consumer from handling its own ready output. */
+  private ownReadyAdvertisement: object | null = null;
+  private ownReadyRequest: object | null = null;
+  /** A mutating event observer cannot recursively multiply one request response. */
+  private readyResponseInFlight = false;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -189,25 +194,24 @@ export class PresenceRuntime {
 
   handleReady(payload: unknown): void {
     try {
+      // Check identity before parsing: our frozen startup request and response
+      // advertisement are synchronous bus output, never peer input.
+      if (payload === this.ownReadyAdvertisement || payload === this.ownReadyRequest) return;
       const ready = parsePresenceReady(payload);
-      if (!ready || ready.sessionId !== this.sessionId) return;
-
-      const retainedLocalEvents = this.registry.snapshot().filter(
-        (event) => event.source.id === LOCAL_SOURCE.id || event.source.id === TODO_SOURCE,
-      );
-      for (const retained of retainedLocalEvents) {
-        const replay: PresenceUpdate = {
-          ...retained,
-          generation: this.generation,
-          sequence: ++this.localSequence,
-          attention: "none",
-        };
-        if (!this.registry.acceptParsed(replay)) continue;
-        this.apply(replay);
-        this.emitUpdate(replay);
+      if (!ready || ready.sessionId !== this.sessionId || ready.consumer) return;
+      // A consumer-less ready is the only replay/discovery request. Keep the
+      // guard through both output phases so reentrant observers cannot turn
+      // one request into a nested replay fan-out.
+      if (this.readyResponseInFlight) return;
+      this.readyResponseInFlight = true;
+      try {
+        this.emitReadyAdvertisement(ready.sessionId);
+        this.replayRetainedLocalEvents();
+      } finally {
+        this.readyResponseInFlight = false;
       }
     } catch {
-      // Ready replay must never affect Pi work.
+      // Ready discovery and replay must never affect Pi work.
     }
   }
 
@@ -254,7 +258,10 @@ export class PresenceRuntime {
     await this.initializeOptionalIntegrations(nextSessionId);
     if (!this.isCurrent(epoch, nextSessionId)) return;
 
-    this.emitReady(nextSessionId);
+    // The advertisement lets already-running producers discover this
+    // consumer; the following consumer-less request makes them replay once.
+    this.emitReadyAdvertisement(nextSessionId);
+    this.emitReadyRequest(nextSessionId);
     this.publish("idle");
     if (!this.officialHook) {
       void this.client?.feed("SessionStart", nextSessionId);
@@ -460,6 +467,9 @@ export class PresenceRuntime {
     this.suppressParentAttentionOnce = false;
     this.officialHook = false;
     this.statusScope = undefined;
+    this.ownReadyAdvertisement = null;
+    this.ownReadyRequest = null;
+    this.readyResponseInFlight = false;
   }
 
   private isCurrent(epoch: number, sessionId: string): boolean {
@@ -908,18 +918,51 @@ export class PresenceRuntime {
     }
   }
 
-  private emitReady(sessionId: string): void {
+  private replayRetainedLocalEvents(): void {
+    const retainedLocalEvents = this.registry.snapshot().filter(
+      (event) => event.source.id === LOCAL_SOURCE.id || event.source.id === TODO_SOURCE,
+    );
+    for (const retained of retainedLocalEvents) {
+      const replay: PresenceUpdate = {
+        ...retained,
+        generation: this.generation,
+        sequence: ++this.localSequence,
+        attention: "none",
+      };
+      if (!this.registry.acceptParsed(replay)) continue;
+      this.apply(replay);
+      this.emitUpdate(replay);
+    }
+  }
+
+  private emitReadyAdvertisement(sessionId: string): void {
+    const advertisement = Object.freeze({
+      version: 1 as const,
+      sessionId,
+      consumer: Object.freeze({
+        id: "pi-cmux-presence",
+        capabilities: Object.freeze(["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"]),
+      }),
+    });
     try {
-      this.pi.events.emit(PI_PRESENCE_READY_EVENT, {
-        version: 1,
-        sessionId,
-        consumer: {
-          id: "pi-cmux-presence",
-          capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"],
-        },
-      });
+      this.ownReadyAdvertisement = advertisement;
+      this.pi.events.emit(PI_PRESENCE_READY_EVENT, advertisement);
     } catch {
       // Process-local producers are optional.
+    } finally {
+      this.ownReadyAdvertisement = null;
+    }
+  }
+
+  private emitReadyRequest(sessionId: string): void {
+    const request = Object.freeze({ version: 1 as const, sessionId });
+    try {
+      this.ownReadyRequest = request;
+      this.pi.events.emit(PI_PRESENCE_READY_EVENT, request);
+    } catch {
+      // Process-local producers are optional.
+    } finally {
+      this.ownReadyRequest = null;
     }
   }
 

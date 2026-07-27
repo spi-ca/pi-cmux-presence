@@ -53,6 +53,54 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
   return Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.includes(key));
 }
 function hasOwn(value: Record<string, unknown>, key: string): boolean { return Object.hasOwn(value, key); }
+
+/**
+ * Copies only own data properties after checking the complete key set. Ready
+ * payloads are process-local but untrusted: this avoids getter/proxy races and
+ * makes every later validation read a stable snapshot.
+ */
+function snapshotOwnDataFields(
+  value: unknown,
+  allowed: readonly string[],
+  required: readonly string[],
+): Record<string, unknown> | null {
+  if (!isPlainObject(value)) return null;
+  const keys = Reflect.ownKeys(value);
+  if (!keys.every((key) => typeof key === "string" && allowed.includes(key))
+    || !required.every((key) => keys.includes(key))) return null;
+  const snapshot: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) return null;
+    snapshot[key as string] = descriptor.value;
+  }
+  return snapshot;
+}
+
+/** Copy a dense, bounded capability list without reading indexed accessors. */
+function snapshotCapabilities(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const keys = Reflect.ownKeys(value);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor)
+    || typeof lengthDescriptor.value !== "number"
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+    || lengthDescriptor.value > 16) return null;
+  const length = lengthDescriptor.value;
+  if (keys.length !== length + 1
+    || !keys.every((key) => key === "length"
+      || (typeof key === "string"
+        && /^(?:0|[1-9]\d*)$/.test(key)
+        && Number(key) < length))) return null;
+  const capabilities: string[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !safeText(descriptor.value)) return null;
+    capabilities.push(descriptor.value);
+  }
+  return capabilities;
+}
 // Directional formatting marks can make a benign-looking target render differently.
 function safeText(value: unknown): value is string {
   return typeof value === "string"
@@ -168,17 +216,19 @@ export function parsePresenceRemove(value: unknown): PresenceRemove | null {
   }
 }
 
-/** A ready event grants no authority; it only asks current producers to replay and advertises passive UI capabilities. */
+/** A ready event grants no authority: no consumer is a discovery/replay request, while a consumer is a passive advertisement. */
 export interface PresenceReady { version: 1; sessionId: string; consumer?: { id: string; capabilities: string[] }; }
 export function parsePresenceReady(value: unknown): PresenceReady | null {
   try {
-    if (!isPlainObject(value) || !hasOnlyKeys(value, READY_KEYS) || value.version !== 1 || !safeText(value.sessionId)) return null;
-    const rawConsumer = value.consumer;
-    if (rawConsumer === undefined) return { version: 1, sessionId: value.sessionId };
-    if (!isPlainObject(rawConsumer) || !hasOnlyKeys(rawConsumer, CONSUMER_KEYS) || !hasOwn(rawConsumer, "id") || !hasOwn(rawConsumer, "capabilities")
-      || !safeText(rawConsumer.id) || !Array.isArray(rawConsumer.capabilities) || rawConsumer.capabilities.length > 16
-      || !rawConsumer.capabilities.every((entry) => safeText(entry))) return null;
-    return { version: 1, sessionId: value.sessionId, consumer: { id: rawConsumer.id, capabilities: [...rawConsumer.capabilities] } };
+    const root = snapshotOwnDataFields(value, READY_KEYS, ["version", "sessionId"]);
+    if (!root || root.version !== 1 || !safeText(root.sessionId)) return null;
+    if (!hasOwn(root, "consumer")) return { version: 1, sessionId: root.sessionId };
+
+    const consumer = snapshotOwnDataFields(root.consumer, CONSUMER_KEYS, CONSUMER_KEYS);
+    if (!consumer || !safeText(consumer.id)) return null;
+    const capabilities = snapshotCapabilities(consumer.capabilities);
+    if (!capabilities) return null;
+    return { version: 1, sessionId: root.sessionId, consumer: { id: consumer.id, capabilities } };
   } catch { return null; }
 }
 
