@@ -15,7 +15,7 @@
 | subagent 실행·취소·결과 | 관여하지 않음 | 실행 패키지가 authority를 유지 | scheduler, lease, reaper, cleanup 등의 실제 범위는 외부 구현의 계약 |
 | cmux 상태 스타일 | state별 고정 icon/color/priority, surface-scoped key | cmux 직접 mutation을 요구하지 않음 | V1 socket |
 | cmux progress | todo-first deterministic 단일 슬롯 중재; flag가 꺼지면 초기·종료 clear도 생략 | 실제로 보유한 determinate progress만 선택 발행 가능 | cmux workspace당 progress 슬롯 하나 |
-| 알림·flash·log | official hook 우선 뒤 channel suppression·레거시 kill switch·policy·capability로 게이팅; exact `pi-subagent` terminal은 의미적으로 한 번만 집계 | foreground/background terminal summary를 동일하게 발행 가능 | `settled`는 local success/error와 external error만 notification; terminal success는 parent settlement와 병합; replay/cancel/handoff는 `attention: "none"`; 성공 flash는 기본 비활성 |
+| 알림·flash·log | official hook 우선 뒤 channel suppression·레거시 kill switch·policy·capability로 게이팅; exact `pi-subagent` terminal은 의미적으로 한 번만 집계 | foreground/background terminal summary를 동일하게 발행 가능 | `settled`는 local success/error·external error와 finalized local completion인 merged parent/subagent success를 notification; generic external info/success는 제외; replay/cancel/handoff는 `attention: "none"`; 성공 flash는 기본 비활성 |
 | Pi PID/lifecycle | 공식 hook 부재 시 기본 활성 fallback | 관여하지 않음 | generic event가 PID/lifecycle command를 만들 수 없음 |
 | Feed | 공식 hook 부재 시 opt-in privacy-minimal fallback | Feed 직접 호출을 요구하지 않음 | prompt/input/output/path 제외 |
 | metadata block | opt-in 숫자 집계 | 숫자 summary를 event에 포함할 수 있음 | producer text 제외 |

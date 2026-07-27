@@ -7,7 +7,7 @@ flowchart TB
   subgraph Pi[Pi process]
     direction LR
     Lifecycle[Pi lifecycle] --> Hooks[Hooks]
-    Updates[Process-local updates] --> Hooks
+    Events[Process-local events<br/>update / remove / ready] --> Hooks
   end
 
   Hooks --> Runtime[PresenceRuntime]
@@ -35,5 +35,5 @@ flowchart TB
   Client -. best-effort failures .-> Drop
 
   class Runtime,Validate,Present,Client core
-  class Updates,Hooks,Target,Transport,Drop boundary
+  class Events,Hooks,Target,Transport,Drop boundary
   class Cmux cmux

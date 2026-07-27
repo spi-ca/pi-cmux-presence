@@ -34,7 +34,7 @@ notification 정책은 다음과 같습니다.
 
 - `errors`: `attention: "error"`만 알립니다.
 - `background`(기본): 일반 외부 producer의 non-`none` attention과 error를 알리되, 내장 Pi의 단독 성공은 알리지 않습니다. 부모 성공과 `pi-subagent` 성공 집계가 실제 settlement에서 합쳐진 경우만 내장 성공으로 알릴 수 있습니다.
-- `settled`: 정확히 settle된 local Pi 성공·error와 외부 error만 알립니다. 외부 `info`·`success`는 알리지 않습니다. 즉 local success/error는 yes, external info/success는 no, external error는 yes입니다.
+- `settled`: 정확히 settle된 local Pi 성공·error와 외부 error를 알립니다. 일반 외부 `info`·`success`는 알리지 않습니다. 단, 성공한 부모 settlement와 exact `pi-subagent` 성공 집계가 병합된 결과는 finalized local completion이므로 성공 알림 대상입니다. 즉 standalone local success/error는 yes, generic external info/success는 no, merged parent/subagent success는 yes, external error는 yes입니다.
 - `all`: 모든 non-`none` attention을 알립니다.
 - `disabled`: notification을 만들지 않습니다.
 
@@ -67,7 +67,9 @@ notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 
 
 이 이미지는 negotiation 개요이며, 아래의 세부 규칙을 대체하지 않습니다. Mermaid 원본: [`diagram/protocol-negotiation.mmd`](diagram/protocol-negotiation.mmd)
 
-초기화는 V2 `system.capabilities`를 조회합니다. `notification.create_for_surface`, `surface.trigger_flash`, `feed.push`, `workspace.set_auto_title`, `surface.resume.get/set/clear`은 서버가 해당 정확한 메서드를 capability로 광고한 경우에만 호출합니다. capability 응답이 없거나 잘못되면 V1 관찰은 계속 가능하지만 선택 V2 메서드는 호출하지 않습니다.
+초기화는 V2 `system.capabilities`를 조회합니다. `notification.create_for_surface`, `surface.trigger_flash`, `feed.push`, `workspace.set_auto_title`, `surface.resume.get/set/clear`은 서버가 해당 정확한 메서드를 capability로 광고한 경우에만 호출합니다. capability 응답이 없거나 아래 strict schema를 벗어나면 V1 관찰은 계속 가능하지만 선택 V2 메서드는 모두 비활성화합니다.
+
+capability result는 top-level key가 `protocol`, `version`, `methods`, 선택 `access_mode`, `socket_path` 중 하나여야 하고 unknown key를 허용하지 않습니다. `protocol`은 정확히 `cmux-socket`, `version`은 정확히 `2`, `methods`는 최대 512개의 protocol token 배열이어야 합니다. 각 V2 응답 line은 CR 없이 16 KiB 이하여야 하며 성공 envelope는 정확히 `{ id, ok: true, result }`, 오류 envelope는 정확히 `{ id, ok: false, error: { code, message } }`만 허용합니다. envelope나 error object의 additive key도 거부하며 해당 호출만 best-effort로 유실됩니다.
 
 native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|idle`을 해당 `--panel=<CMUX_SURFACE_ID>`에 보냅니다. `idle`은 cmux에 유휴 상태를 알리는 신호이며, 이 확장이 hibernate/resume을 수행하거나 실행 lifecycle authority를 갖는 것은 아닙니다. 공식 cmux hook precedence가 적용되면 이 native lifecycle도 보내지 않습니다(아래 "identity·소켓과 공식 hook 우선순위" 참고).
 
@@ -81,9 +83,16 @@ payload의 정확한 키, 공유 generation/sequence fence, reserved source와 �
 
 ## opt-in 데이터와 resume 보호
 
-`feed`는 session ID, event 이름, tool call ID·tool name과 cmux가 이미 제공한 `_source`·workspace/surface ID만 보낼 수 있습니다. `meta block`은 아홉 개의 숫자 집계만 보냅니다. `auto title`은 Pi가 제공한 session name을 보낼 수 있고, `resume fallback`은 session ID와 `pi --session '<sessionId>'`를 binding에 보냅니다. 따라서 모두 기본 비활성입니다.
+`feed`는 session ID, event 이름, tool call ID·tool name과 cmux가 이미 제공한 `_source`·workspace/surface ID만 보낼 수 있습니다. lifecycle 매핑은 session 시작의 `SessionStart`, agent 시작 전의 `UserPromptSubmit`, tool 실행 전·후의 `PreToolUse`·`PostToolUse`, local settlement의 `Stop`입니다. tool 식별자는 앞뒤 두 tool event에만 포함할 수 있습니다. `meta block`은 아래 순서의 아홉 줄 숫자만 보내며 label이나 producer text를 넣지 않습니다.
 
-feed의 session/tool call ID와 resume fallback의 checkpoint ID는 cmux protocol의 `[A-Za-z0-9_.:-]{1,128}` token이어야 합니다. process-local session safe text에는 해당하지만 이 token 형식이 아닌 ID에서는 해당 feed 요청과 resume fallback을 생략합니다.
+1. retained source의 `active`, `completed`, `failed`, `queued`, `cancelled`, `total` 합계 여섯 줄
+2. token 합계를 반올림한 정수
+3. cost 합계를 소수점 둘째 자리까지 고정한 값
+4. source별 context percent 중 최댓값을 반올림한 정수
+
+`auto title`은 Pi가 제공한 session name을 보낼 수 있고, `resume fallback`은 session ID와 `pi --session '<sessionId>'`를 binding에 보냅니다. 따라서 모두 기본 비활성입니다.
+
+feed의 session/tool call ID와 resume fallback의 checkpoint ID는 cmux protocol의 `[A-Za-z0-9_.:-]{1,128}` token이어야 합니다. tool name은 control/bidi 문자가 없는 1–128 UTF-8 bytes text여야 합니다. process-local safe text에는 해당하지만 이 형식을 벗어나는 session ID, tool call ID 또는 tool name이 있으면 validator가 해당 feed 요청 전체를 생략합니다. 같은 token 제약을 벗어난 session ID에서는 resume fallback도 생략합니다.
 
 resume fallback은 `surface.resume.get`으로 기존 binding을 먼저 읽습니다. binding이 비어 있거나 동일 checkpoint인 경우에만 설정하며, 다른 checkpoint 또는 해석할 수 없는 binding은 덮어쓰지 않습니다. 설정 뒤에도 같은 binding의 소유를 확인해야 하며, shutdown에서 자신이 확인한 동일 binding만 `surface.resume.clear`로 제거합니다.
 
@@ -99,13 +108,14 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 
 | 상태 | sidebar | notification title | notification body |
 | --- | --- | --- | --- |
-| `idle` / `waiting` | `Pi · Waiting` | `Pi` | `Waiting` |
+| `idle` | `Pi · Idle` | `Pi` | `Idle` |
+| `waiting` | `Pi · Waiting` | `Pi` | `Waiting` |
 | `running` | `Pi · Writing response` | `Pi` | `Writing response` |
 | `success` | `Pi · Response ready` | `Pi` | `Response ready` |
 | `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
 | `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
 
-local terminal은 `agent_end`만으로 확정하지 않고 idle인 `agent_settled`에서만 최종 publish합니다. host가 `agent_settled` hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
+local terminal은 `agent_end`만으로 확정하지 않고 settlement를 의미하는 `agent_settled`에서 최종 publish합니다. hook context가 `isIdle()`을 제공하고 `false`를 반환하면 아직 idle이 아니므로 확정하지 않으며, context나 함수가 없으면 `agent_settled` hook 자체를 settlement 증거로 사용합니다. host가 그 hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
 ## identity·소켓과 공식 hook 우선순위
 
