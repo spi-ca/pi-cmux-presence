@@ -73,6 +73,7 @@ describe("notification policy", () => {
     expect(shouldNotifyAttention("settled", true, "error", "local")).toBe(true);
     expect(shouldNotifyAttention("settled", true, "info", "external")).toBe(false);
     expect(shouldNotifyAttention("settled", true, "success", "external")).toBe(false);
+    expect(shouldNotifyAttention("settled", true, "success", "external", true)).toBe(true);
     expect(shouldNotifyAttention("settled", true, "error", "external")).toBe(true);
     expect(shouldNotifyAttention("settled", false, "error", "local")).toBe(false);
     expect(shouldNotifyAttention("all", true, "info", "local")).toBe(true);
