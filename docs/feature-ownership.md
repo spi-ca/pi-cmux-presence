@@ -8,7 +8,7 @@
 
 | 기능 | `pi-cmux-presence` | `pi-subagent` producer 계약·예시 | 비고 |
 | --- | --- | --- | --- |
-| 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 fixed local summary로 surface status를 표시 | 관여하지 않음 | idle `agent_settled`에서 최종화; assistant body/prompt/path/tool content는 표시하지 않음 |
+| 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 fixed local summary로 surface status를 표시 | 관여하지 않음 | `agent_settled`에서 최종화(미지원 host는 `agent_end` fallback, `isIdle()`이 명시적으로 `false`면 보류); assistant body/prompt/path/tool content는 표시하지 않음 |
 | todo 진행률 | 검증한 `todo` 결과에서 count와 `completed/visible`만 계산 | 관여하지 않음 | task 텍스트는 전송하지 않음 |
 | subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 원하면 `pi-presence:update:v1` summary와 capability-gated `pi-presence:remove:v1`을 발행 | package dependency 없음; label/kind는 special routing 조건이 아님 |
 | root aggregate·child `inherit` | 관여하지 않음; 로드된 경우 수락한 event만 observer로 표시 | root aggregate 소유와 `inherit` child 정책은 producer가 결정 | consumer는 이를 의존·조정·두 package load-order로 검증하지 않음; extension이 없으면 이 consumer 동작도 없음 |
