@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 fixed local summary로 surface status를 표시 | 관여하지 않음 | `agent_settled`에서 최종화(미지원 host는 `agent_end` fallback, `isIdle()`이 명시적으로 `false`면 보류); assistant body/prompt/path/tool content는 표시하지 않음 |
 | todo 진행률 | 검증한 `todo` 결과에서 count와 `completed/visible`만 계산 | 관여하지 않음 | task 텍스트는 전송하지 않음 |
-| subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 원하면 `pi-presence:update:v1` summary와 capability-gated `pi-presence:remove:v1`을 발행 | package dependency 없음; label/kind는 special routing 조건이 아님 |
+| subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 일반 transient producer는 passive/diagnostic ready capability 확인 뒤 update/remove를 발행하는 방식을 권장. `pi-subagent`는 이전 consumer 호환을 위해 update/remove를 의도적으로 ungated 발행 | package dependency 없음; 구형 consumer는 마지막 update를 session teardown까지 sticky하게 유지할 수 있음; label/kind는 special routing 조건이 아님 |
 | root aggregate·child `inherit` | 관여하지 않음; 로드된 경우 수락한 event만 observer로 표시 | root aggregate 소유와 `inherit` child 정책은 producer가 결정 | consumer는 이를 의존·조정·두 package load-order로 검증하지 않음; extension이 없으면 이 consumer 동작도 없음 |
 | subagent 실행·취소·결과 | 관여하지 않음 | 실행 패키지가 authority를 유지 | scheduler, lease, reaper, cleanup 등의 실제 범위는 외부 구현의 계약 |
 | cmux 상태 스타일 | state별 고정 icon/color/priority, surface-scoped key | cmux 직접 mutation을 요구하지 않음 | V1 socket |
@@ -21,13 +21,13 @@
 | metadata block | opt-in 숫자 집계 | 숫자 summary를 event에 포함할 수 있음 | producer text 제외 |
 | workspace title | opt-in Pi session name | 관여하지 않음 | 공식 hook 우선 |
 | session resume | opt-in, 소유 확인한 exact binding fallback | subagent session resume authority를 이전하지 않음 | 공식 cmux Pi hook 우선 |
-| ready/replay | consumer capability와 `presence-remove-v1` 지원을 광고하고 local/todo를 재발행 | matching ready에 retained summary를 새 sequence와 `attention: "none"`으로 재발행할 수 있음 | 실행 authority가 아닌 protocol 수준의 load-order 보정이며 두 package load-order test는 아님 |
+| ready/replay | startup에서 advertisement 뒤 consumer-less request 하나를 내고, 외부 request에는 advertisement 하나와 local/todo replay 한 번으로 응답 | matching consumer-less request에 retained summary를 새 sequence와 `attention: "none"`으로 재발행할 수 있음 | `consumer` 없음=request, 있음=passive advertisement; advertisement는 replay/response를 유발하지 않으며 response는 reentrancy-guarded |
 
 ## 유연한 연동 원칙
 
 - 공통 채널은 `pi-presence:update:v1`, `pi-presence:remove:v1`, `pi-presence:ready:v1`입니다.
 - wire DTO는 두 저장소에 의도적으로 중복 선언합니다. 런타임 package dependency나 shared lifecycle 모듈을 만들지 않습니다.
-- `ready.consumer`는 UI capability 힌트이며 인증·명령 채널이 아닙니다.
+- `ready.consumer`는 passive/diagnostic UI capability 힌트이며 인증·명령 채널이나 mandatory gate가 아닙니다. 일반 transient producer에는 matching ready capability 확인을 권장하지만, `pi-subagent`는 이전 consumer 호환을 위해 update/remove를 의도적으로 ungated 발행합니다. 생략된 `consumer`는 matching active consumer의 best-effort advertisement와 local/todo replay response를 요청하고, consumer-bearing advertisement는 response나 replay를 유발하지 않습니다. startup advertisement/request는 producer-first, 이 response는 consumer-first load order를 각각 보정합니다.
 - `pi-cmux-presence`는 모든 source에 generic update 검증을 적용하고 `pi`·`pi-todo`는 local source로 예약합니다. 단, 정확한 `source.id: "pi-subagent"`의 **attention**만 누적 count·parent settlement 기반 special policy를 사용합니다. 다른 ID와 `source.label`/`source.kind`에는 적용하지 않습니다.
 - `pi-subagent` 같은 producer는 필요하면 안정된 `source.id: "pi-subagent"`를 사용할 수 있습니다. 이 ID가 있어도 consumer의 수락·부재가 producer의 root aggregate 소유, 실행·결과·취소·cleanup authority를 바꾸어서는 안 됩니다. managed child가 이 extension을 로드하지 않으면 그 child에 이 consumer의 표시·알림 동작은 요구되지 않습니다.
 - event listener, 잘못된 host session ID와 cmux socket 실패는 lifecycle 결과를 바꾸지 않습니다. presence는 focus polling을 하거나 foreground/background handoff를 제어할 trusted read-only capability가 없습니다. focused-banner suppression과 notification retention은 cmux 소유입니다. local Pi와 `pi-subagent` cancellation은 status-only `attention: "none"`으로 남으며 permissive policy도 native notification/flash로 승격하지 않습니다.

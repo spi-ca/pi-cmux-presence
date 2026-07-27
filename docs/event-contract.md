@@ -77,7 +77,7 @@ consumer는 host가 제공한 session ID도 같은 1–96 Unicode code points sa
 
 수락된 remove는 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block도 다시 계산합니다. remove 자체는 generic `log`, notification, flash 또는 feed를 새로 만들지 않으며, 이미 만든 notification의 보존·dismiss는 계속 cmux 소유입니다. 정확한 `source.id: "pi-subagent"` remove는 누적 terminal baseline과 보류 burst를 무효화합니다. 그 burst 때문에 보류된 local parent attention이 있으면 producer payload를 복사하지 않는 local fallback을 기존 policy·capability gate로 처리합니다.
 
-이 저장소는 consumer만 제공합니다. transient producer는 matching ready의 `presence-remove-v1` capability를 확인한 뒤에만 최초 retained update를 발행하고, 정상 답변·취소·abort·예외·shutdown의 종료 경로에서 더 높은 sequence로 remove하는 것이 안전합니다. 열린 상태를 matching ready에 replay할 때는 새 sequence와 `attention: "none"`을 사용해야 하며, 이미 끝났다면 replay하지 않습니다. 동시 요청은 고정 source 하나에 `active`·`queued` count로 집계하고 마지막 요청이 끝날 때만 remove하는 방식을 권장합니다. prompt, 선택지, 답변, tool call ID, 경로, credential 또는 raw error는 update/remove에 넣지 않아야 합니다. 이 producer lifecycle은 외부 producer의 책임이며 이 저장소에 ask-user producer 구현이나 그 lifecycle 검증이 있다고 주장하지 않습니다. remove를 모르는 이전 consumer는 event를 구독하지 않아 무시할 수 있고, remove를 발행하지 않는 이전 producer의 마지막 update는 기존처럼 session teardown까지 retained됩니다.
+이 저장소는 consumer만 제공합니다. transient producer는 matching ready의 `presence-remove-v1` capability를 확인한 뒤 최초 retained update를 발행하는 것이 **권장**되며, 정상 답변·취소·abort·예외·shutdown의 종료 경로에서 더 높은 sequence로 remove하는 것이 안전합니다. 이는 mandatory gate가 아니다. 특히 `pi-subagent`는 이전 consumer 호환성을 위해 capability를 기다리지 않는 ungated update/remove를 의도적으로 발행하며, 그런 이전 consumer는 마지막 update를 session teardown까지 sticky하게 유지합니다. 열린 상태를 matching ready에 replay할 때는 새 sequence와 `attention: "none"`을 사용해야 하며, 이미 끝났다면 replay하지 않습니다. 동시 요청은 고정 source 하나에 `active`·`queued` count로 집계하고 마지막 요청이 끝날 때만 remove하는 방식을 권장합니다. prompt, 선택지, 답변, tool call ID, 경로, credential 또는 raw error는 update/remove에 넣지 않아야 합니다. 이 producer lifecycle은 외부 producer의 책임이며 이 저장소에 ask-user producer 구현이나 그 lifecycle 검증이 있다고 주장하지 않습니다. remove를 모르는 이전 consumer는 event를 구독하지 않아 무시할 수 있고, remove를 발행하지 않는 이전 producer의 마지막 update는 기존처럼 session teardown까지 retained됩니다.
 
 ## progress 선택과 상태 표시
 
@@ -113,7 +113,7 @@ cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress�
 
 ## ready 광고와 재발행
 
-consumer는 session 시작 뒤 `pi-presence:ready:v1`을 발행합니다.
+consumer는 session 시작 뒤 `pi-presence:ready:v1` consumer advertisement를 발행합니다. `consumer`의 존재 여부는 엄격한 V1 wire shape 안에서 request/response 방향을 구분합니다.
 
 ```ts
 {
@@ -126,7 +126,11 @@ consumer는 session 시작 뒤 `pi-presence:ready:v1`을 발행합니다.
 }
 ```
 
-현재 consumer advertisement는 `id: "pi-cmux-presence"`, capabilities `cmux-status`, `cmux-progress`, `cmux-attention`, `presence-remove-v1`입니다. ready는 capability 힌트와 재발행 요청일 뿐 authority를 위임하지 않습니다. 내장 `pi`와 `pi-todo`는 matching session ready를 받으면 retained state를 새 sequence 및 `attention: "none"`으로 replay합니다. 일반 producer도 필요하면 자신의 상태를 새 sequence로 재발행할 수 있습니다. replay는 현재 status를 복원할 뿐 과거 성공·error를 다시 notification/flash하지 않습니다.
+현재 consumer advertisement는 `id: "pi-cmux-presence"`, capabilities `cmux-status`, `cmux-progress`, `cmux-attention`, `presence-remove-v1`입니다. session startup은 이 frozen advertisement를 먼저 한 번 내고, 이어 frozen consumer-less request를 정확히 한 번 냅니다. consumer는 자기 request의 exact object identity를 무시하므로 local/todo를 자기 자신에게 replay하지 않습니다.
+
+`consumer`가 **없는** 유효한 matching-session ready는 replay/discovery **request**다. 활성 consumer는 외부 request 하나에 frozen advertisement 하나를 best-effort로 응답한 뒤 retained local `pi`/`pi-todo` state를 각각 새 sequence 및 `attention: "none"`으로 정확히 한 번 replay한다. `consumer`가 **있는** 유효한 ready는 passive consumer **advertisement**일 뿐이며 consumer는 response하거나 local/todo replay를 해서는 안 된다. 따라서 여러 producer/consumer의 advertisement가 replay fan-out을 만들지 않는다. consumer는 자신의 advertisement/request identity를 parsing 전에 무시하고, response 중 nested request도 무시한다. malformed·stale·비활성 session event는 무시한다.
+
+일반 producer는 matching consumer-less request에 retained state를 새 sequence 및 `attention: "none"`으로 replay할 수 있다. replay는 현재 status를 복원할 뿐 과거 성공·error를 다시 notification/flash하지 않는다. startup advertisement/request는 producer-first load order를, 외부 request에 대한 consumer response는 consumer-first load order를 보정한다. event emit 실패는 이 선택적 discovery 응답과 replay를 Pi 작업의 실패로 바꾸지 않는다. ready root, consumer, capability array 및 consumer request는 frozen output이며 mutation observer가 protocol state를 바꾸지 못한다.
 
 ## RPIV todo 진행률
 
@@ -157,7 +161,7 @@ pi.events.emit("pi-presence:update:v1", {
 
 `progress`·`usage`는 producer가 실제로 제공할 때만 넣습니다. consumer는 이를 추정하지 않습니다. 다만 attention 집계에는 위 절의 정확한 `source.id: "pi-subagent"` 예외가 있으며, 그 외 외부 producer에는 source별 generic 규칙을 적용합니다.
 
-## local turn presentation and settled policy
+## 로컬 턴 표시와 settled 정책
 
 내장 `pi` source는 event payload의 assistant response body·preview, user prompt, raw error, path 또는 tool content를 sidebar/notification에 추가하지 않습니다. 상태별 고정 summary는 `Idle`, `Waiting`, `Writing response`, `Response ready`, `Needs attention`, `Cancelled`이며 sidebar는 각각 `Pi · <summary>`, notification은 title `Pi`와 같은 summary body를 사용합니다.
 

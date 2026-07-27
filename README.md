@@ -80,7 +80,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 `pi-presence:update:v1`과 consumer-side `pi-presence:remove:v1`은 같은 Pi 프로세스 event bus 입력입니다. remove는 이미 수락된 외부 source의 retained 상태만 철회하며, payload에 표시·attention 데이터를 담지 않습니다. V1 payload, 공유 순서 fence, 삭제와 progress 선택 규칙은 [이벤트 계약](docs/event-contract.md)을 따릅니다. 내장 source `pi`와 todo source `pi-todo`는 예약되어 외부 update·remove payload로는 수락하지 않습니다.
 
-소비자는 세션 시작 시 다음 ready 광고를 냅니다. 이는 생산자에게 현재 상태 재발행을 요청하는 신호일 뿐 실행·취소·재시도 권한을 주지 않습니다. ready replay의 `attention`은 반드시 `none`이므로 과거 완료·실패를 다시 알리지 않습니다.
+소비자는 세션 시작 시 frozen ready 광고를 낸 뒤 frozen consumer-less replay/discovery request를 정확히 한 번 냅니다. 자기 request는 exact identity로 무시합니다. `consumer`가 없는 외부 strict V1 request에는 frozen 광고 하나와 retained local/todo state의 한 번의 `attention: "none"` replay로 응답합니다. `consumer`가 있는 광고는 passive capability advertisement일 뿐 response나 replay를 만들지 않아 multi-producer fan-out을 막습니다. 이는 실행·취소·재시도 권한을 주지 않습니다.
 
 ```ts
 pi.events.emit("pi-presence:ready:v1", {
@@ -93,7 +93,7 @@ pi.events.emit("pi-presence:ready:v1", {
 });
 ```
 
-내장 Pi와 todo 생산자는 matching ready를 받으면 retained 상태를 새 sequence 및 `attention: "none"`으로 재발행합니다. remove를 모르는 이전 consumer는 이 event를 구독하지 않아 무시할 수 있고, remove를 발행하지 않는 이전 producer의 마지막 update는 기존처럼 session teardown까지 retained됩니다. producer의 capability gate, replay, 개인정보 및 동시성 정책은 외부 producer 문서의 범위입니다. 이 consumer 저장소에는 ask-user producer나 그 lifecycle 구현이 없습니다.
+일반 producer는 matching consumer-less request를 받으면 retained 상태를 새 sequence 및 `attention: "none"`으로 재발행할 수 있습니다. startup advertisement/request는 producer-first, 외부 request response는 consumer-first load order를 보정합니다. stale·malformed·비활성 session request는 무시하고, event emit 실패는 선택적 discovery/replay 출력만 잃게 하며 Pi 작업을 실패시키지 않습니다. transient producer의 capability 확인은 권장이며 mandatory gate가 아닙니다. `pi-subagent`는 이전 consumer 호환성을 위해 ungated update/remove를 의도적으로 내며, 이전 consumer는 마지막 update를 session teardown까지 sticky하게 유지합니다. 이 consumer 저장소에는 ask-user producer나 그 lifecycle 구현이 없습니다.
 
 ## 개인정보와 전송 범위
 
