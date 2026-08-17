@@ -110,9 +110,10 @@ export class PresenceClient {
     }, `status:${key}`);
   }
 
-  async clearStatus(key: string): Promise<void> {
-    if (!this.config.sidebar) return;
-    await this.v1({ command: "clear_status", tab: this.identity.workspaceId, key }, `status:${key}`);
+  /** Reports whether cmux acknowledged the idempotent status withdrawal. */
+  async clearStatus(key: string): Promise<boolean> {
+    if (!this.config.sidebar) return true;
+    return this.v1({ command: "clear_status", tab: this.identity.workspaceId, key }, `status:${key}`);
   }
 
   async progress(value: number, label?: string): Promise<void> {
@@ -312,12 +313,14 @@ export class PresenceClient {
     return this.supported.has(method) ? await this.v2(method, params, key) : undefined;
   }
 
-  private async v1(command: V1Command, key?: string): Promise<void> {
-    if (this.closed) return;
+  private async v1(command: V1Command, key?: string): Promise<boolean> {
+    if (this.closed) return false;
     try {
       decodeV1Response(await this.transport.request(encodeV1(command), key));
+      return true;
     } catch {
       // Best-effort observer.
+      return false;
     }
   }
 

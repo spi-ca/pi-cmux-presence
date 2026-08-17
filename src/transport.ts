@@ -7,57 +7,184 @@ function sameFingerprint(left: SocketFingerprint, right: SocketFingerprint): boo
   return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid;
 }
 
-async function fingerprint(socketPath: string): Promise<SocketFingerprint> {
-  try {
-    return await safeSocketFingerprint(socketPath);
-  } catch (error) {
-    const detail = error instanceof Error ? `: ${error.message}` : ".";
-    throw new PresenceTransportError(`Socket validation failed${detail}`);
+/** A lease identifies exactly one unresolved filesystem fingerprint. */
+export type SocketFingerprintLease = object;
+
+const activeFingerprintLeases = new WeakMap<UnresolvedSocketFingerprintGate, SocketFingerprintLease>();
+
+/**
+ * Shares ownership of one unabortable socket fingerprint. Transport code reads
+ * the module-private lease store directly, so an override cannot replace the
+ * intrinsic fingerprint operation or forge its result.
+ */
+export class UnresolvedSocketFingerprintGate {
+  get unresolved(): boolean {
+    return activeFingerprintLeases.has(this);
+  }
+
+  acquire(): SocketFingerprintLease | null {
+    return acquireFingerprintLease(this);
+  }
+
+  release(lease: SocketFingerprintLease): boolean {
+    return releaseFingerprintLease(this, lease);
   }
 }
 
-async function exchange(
+function acquireFingerprintLease(gate: UnresolvedSocketFingerprintGate): SocketFingerprintLease | null {
+  if (!(gate instanceof UnresolvedSocketFingerprintGate)) return null;
+  if (activeFingerprintLeases.has(gate)) return null;
+  const lease = {};
+  activeFingerprintLeases.set(gate, lease);
+  return lease;
+}
+
+function releaseFingerprintLease(
+  gate: UnresolvedSocketFingerprintGate,
+  lease: SocketFingerprintLease,
+): boolean {
+  if (activeFingerprintLeases.get(gate) !== lease) return false;
+  activeFingerprintLeases.delete(gate);
+  return true;
+}
+
+type StartedSocketFingerprint = {
+  pending: boolean;
+  promise: Promise<SocketFingerprint>;
+};
+
+/** Always invokes this module's safeSocketFingerprint; a gate only owns a lease. */
+function startSafeSocketFingerprint(
+  socketPath: string,
+  gate: UnresolvedSocketFingerprintGate,
+): StartedSocketFingerprint {
+  const lease = acquireFingerprintLease(gate);
+  if (!lease) {
+    return {
+      pending: false,
+      promise: Promise.reject(new PresenceTransportError("Socket validation is already unresolved.")),
+    };
+  }
+  return {
+    pending: true,
+    promise: (async () => {
+      try {
+        return await safeSocketFingerprint(socketPath);
+      } catch (error) {
+        const detail = error instanceof Error ? `: ${error.message}` : ".";
+        throw new PresenceTransportError(`Socket validation failed${detail}`);
+      } finally {
+        // A stale result can release only the lease that began it.
+        releaseFingerprintLease(gate, lease);
+      }
+    })(),
+  };
+}
+
+/**
+ * Event-driven cancellation for work that cannot itself accept an AbortSignal.
+ * `onAbandoned` owns the still-running operation; callers must not use its
+ * eventual result after it is called.
+ */
+export async function raceAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  abortError: () => PresenceTransportError,
+  onAbandoned?: () => void,
+): Promise<T> {
+  let settled = false;
+  void operation.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  if (signal.aborted) {
+    if (!settled) onAbandoned?.();
+    throw abortError();
+  }
+
+  let removeAbort = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const abort = () => {
+      if (!settled) onAbandoned?.();
+      reject(abortError());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    removeAbort = () => signal.removeEventListener("abort", abort);
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    removeAbort();
+  }
+}
+
+async function connectedExchange(
   socketPath: string,
   line: string,
-  timeoutMs: number,
-  signal?: AbortSignal,
+  before: SocketFingerprint,
+  signal: AbortSignal,
+  abortError: () => PresenceTransportError,
+  failCloseQueue: () => void,
+  fingerprintGate: UnresolvedSocketFingerprintGate,
 ): Promise<string> {
-  if (signal?.aborted) throw new PresenceTransportError("Socket request aborted.");
-  const before = await fingerprint(socketPath);
-  if (signal?.aborted) throw new PresenceTransportError("Socket request aborted.");
+  if (signal.aborted) throw abortError();
 
   return await new Promise<string>((resolve, reject) => {
     const socket = net.createConnection({ path: socketPath });
     let buffer = "";
     let settled = false;
-    let timer: ReturnType<typeof setTimeout>;
-
+    let requestWritten = false;
+    // This remains true after a deadline wins the race, until the intrinsic
+    // filesystem operation itself settles and releases its lease.
+    let postConnectValidationPending = false;
     const finish = (error?: Error, value?: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
+      signal.removeEventListener("abort", abort);
       socket.destroy();
       if (error) reject(error);
       else resolve(value ?? "");
     };
-    const abort = () => finish(new PresenceTransportError("Socket request aborted."));
+    const abort = () => {
+      if (settled) return;
+      const failClose = postConnectValidationPending;
+      finish(abortError());
+      if (failClose) failCloseQueue();
+    };
 
-    timer = setTimeout(
-      () => finish(new PresenceTransportError("Socket request timed out.")),
-      timeoutMs,
-    );
-    signal?.addEventListener("abort", abort, { once: true });
+    signal.addEventListener("abort", abort, { once: true });
+    const failSocketEvent = (error: PresenceTransportError) => {
+      if (settled) return;
+      if (requestWritten) {
+        finish(error);
+        return;
+      }
+      // Only hostile events during a live post-connect fingerprint can leave
+      // an authenticated connection ambiguous enough to fail-close the queue.
+      const failClose = postConnectValidationPending;
+      finish(error);
+      if (failClose) failCloseQueue();
+    };
+
     socket.setEncoding("utf8");
     socket.once("error", (error) => {
-      finish(new PresenceTransportError(`Socket failure: ${error.message}`));
+      if (settled) return;
+      failSocketEvent(new PresenceTransportError(`Socket failure: ${error.message}`));
     });
     const incompleteResponse = () => {
-      finish(new PresenceTransportError("Socket closed before a complete response."));
+      if (settled) return;
+      failSocketEvent(new PresenceTransportError("Socket closed before a complete response."));
     };
     socket.once("end", incompleteResponse);
     socket.once("close", incompleteResponse);
     socket.on("data", (chunk: string) => {
+      if (settled) return;
+      if (!requestWritten) {
+        failSocketEvent(new PresenceTransportError(
+          "Socket sent data before post-connect validation and request write.",
+        ));
+        return;
+      }
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > 16 * 1024 + 1) {
         finish(new PresenceTransportError("Socket response exceeds its bound."));
@@ -73,27 +200,88 @@ async function exchange(
       }
       finish(undefined, response);
     });
-    socket.once("connect", async () => {
-      try {
-        const after = await fingerprint(socketPath);
-        if (signal?.aborted) {
-          abort();
-          return;
+    socket.once("connect", () => {
+      if (settled || signal.aborted) return;
+      const postConnectFingerprint = startSafeSocketFingerprint(socketPath, fingerprintGate);
+      postConnectValidationPending = postConnectFingerprint.pending;
+      void postConnectFingerprint.promise.then(
+        () => { postConnectValidationPending = false; },
+        () => { postConnectValidationPending = false; },
+      );
+      void (async () => {
+        try {
+          const after = await raceAbort(
+            postConnectFingerprint.promise,
+            signal,
+            abortError,
+            () => {
+              if (postConnectValidationPending) failCloseQueue();
+            },
+          );
+          // A late post-connect validation must never gain a write opportunity.
+          if (settled || signal.aborted) return;
+          if (!sameFingerprint(before, after)) {
+            finish(new PresenceTransportError("Socket changed during connection."));
+            return;
+          }
+          requestWritten = true;
+          socket.write(line, (error) => {
+            if (settled || !error) return;
+            finish(new PresenceTransportError(`Socket write failed: ${error.message}`));
+          });
+        } catch (error) {
+          if (settled) return;
+          const failure = error instanceof PresenceTransportError
+            ? error
+            : new PresenceTransportError("Socket validation failed.");
+          finish(failure);
         }
-        if (!sameFingerprint(before, after)) {
-          finish(new PresenceTransportError("Socket changed during connection."));
-          return;
-        }
-        socket.write(line, (error) => {
-          if (error) finish(new PresenceTransportError(`Socket write failed: ${error.message}`));
-        });
-      } catch (error) {
-        finish(error instanceof Error
-          ? error
-          : new PresenceTransportError("Socket validation failed."));
-      }
+      })();
     });
   });
+}
+
+async function exchange(
+  socketPath: string,
+  line: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  failCloseQueue: () => void,
+  fingerprintGate: UnresolvedSocketFingerprintGate,
+): Promise<string> {
+  if (signal?.aborted) throw new PresenceTransportError("Socket request aborted.");
+
+  const deadline = new AbortController();
+  let timedOut = false;
+  const abortFromParent = () => deadline.abort();
+  signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    deadline.abort();
+  }, timeoutMs);
+  const abortError = () => new PresenceTransportError(
+    timedOut ? "Socket request timed out." : "Socket request aborted.",
+  );
+
+  try {
+    const before = await raceAbort(
+      startSafeSocketFingerprint(socketPath, fingerprintGate).promise,
+      deadline.signal,
+      abortError,
+    );
+    return await connectedExchange(
+      socketPath,
+      line,
+      before,
+      deadline.signal,
+      abortError,
+      failCloseQueue,
+      fingerprintGate,
+    );
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromParent);
+  }
 }
 
 interface Pending<T> {
@@ -159,9 +347,7 @@ export class BoundedSocketQueue {
     this.closed = true;
     const draining = this.drainPromise ?? Promise.resolve();
     if (timeoutMs <= 0) {
-      this.abandon = true;
-      this.active?.abort();
-      this.rejectUndispatched();
+      this.failClose();
       await draining;
       return;
     }
@@ -174,8 +360,7 @@ export class BoundedSocketQueue {
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           expired = true;
-          this.abandon = true;
-          this.active?.abort();
+          this.failClose();
           resolve();
         }, timeoutMs);
       }),
@@ -188,6 +373,14 @@ export class BoundedSocketQueue {
     } else if (this.queue.length > 0) {
       this.rejectUndispatched();
     }
+  }
+
+  /** Stop dispatch immediately; used when an unabortable validation is still live. */
+  failClose(): void {
+    this.closed = true;
+    this.abandon = true;
+    this.active?.abort();
+    this.rejectUndispatched();
   }
 
   private rejectUndispatched(): void {
@@ -230,13 +423,21 @@ export class UnixSocketTransport {
     private readonly socketPath: string,
     private readonly timeoutMs: number,
     maxQueue: number,
+    private readonly fingerprintGate = new UnresolvedSocketFingerprintGate(),
   ) {
     this.queue = new BoundedSocketQueue(maxQueue);
   }
 
   request(line: string, key?: string): Promise<string> {
     return this.queue.enqueue(
-      (signal) => exchange(this.socketPath, line, this.timeoutMs, signal),
+      (signal) => exchange(
+        this.socketPath,
+        line,
+        this.timeoutMs,
+        signal,
+        () => this.queue.failClose(),
+        this.fingerprintGate,
+      ),
       key,
     );
   }

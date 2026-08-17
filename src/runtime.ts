@@ -38,7 +38,7 @@ import {
   selectProgress,
 } from "./presentation.js";
 import { TodoProgressAdapter } from "./todo.js";
-import { UnixSocketTransport } from "./transport.js";
+import { UnresolvedSocketFingerprintGate, UnixSocketTransport } from "./transport.js";
 import { UsageTracker } from "./usage.js";
 
 const LOCAL_SOURCE = { id: "pi", label: "Pi", kind: "agent" };
@@ -47,7 +47,8 @@ const TODO_SOURCE = "pi-todo";
 type ContextProvider = { getContextUsage?: () => unknown };
 type TerminalState = "success" | "error" | "cancelled";
 type ToolFeedEvent = { toolCallId?: unknown; toolName?: unknown };
-type OfficialHookDetector = () => Promise<boolean>;
+type OfficialHookDetector = (signal: AbortSignal) => Promise<boolean>;
+type SocketPathResolver = () => Promise<string | null>;
 
 type RuntimeClock = {
   now(): number;
@@ -62,12 +63,22 @@ const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+type StatusClearAttempt = {
+  /** Identifies the current attempt for a status key despite overlapping removes. */
+  readonly token: object;
+  readonly client: PresenceClient;
+  /** Resolves to whether cmux acknowledged this exact attempted clear. */
+  readonly outcome: Promise<boolean>;
+};
+
 type DetachedSession = {
   client: PresenceClient | null;
   sessionId: string | null;
   officialHook: boolean;
   statusScope: string | undefined;
   retainedEvents: PresenceUpdate[];
+  /** Latest unacknowledged clear attempt by status key; bounded by source fences. */
+  pendingStatusClears: Map<string, StatusClearAttempt>;
 };
 
 type PendingSubagentAttention = {
@@ -115,6 +126,18 @@ export class PresenceRuntime {
   private readonly todo = new TodoProgressAdapter();
   private client: PresenceClient | null = null;
   private clientCloseBarrier: Promise<void> = Promise.resolve();
+  /** One intrinsic fingerprint lease may remain unresolved across client replacement. */
+  private readonly fingerprintGate = new UnresolvedSocketFingerprintGate();
+  /** Cancels only the current epoch's wait for official-hook authority. */
+  private officialHookProbeAbort: AbortController | null = null;
+  /** An unabortable hook probe remains exclusive until it actually settles. */
+  private unresolvedOfficialHookProbe: Promise<void> | null = null;
+  /** Cancels only the current epoch's wait for pre-ownership path resolution. */
+  private socketResolutionAbort: AbortController | null = null;
+  /** An unabortable filesystem resolver remains exclusive until it actually settles. */
+  private unresolvedSocketResolution: Promise<void> | null = null;
+  /** Latest attempts only, bounded by the registry's retained-source cap. */
+  private pendingStatusClears = new Map<string, StatusClearAttempt>();
   private contextProvider: ContextProvider | null = null;
   private sessionId: string | null = null;
   private sessionEpoch = 0;
@@ -150,7 +173,8 @@ export class PresenceRuntime {
     private readonly pi: ExtensionAPI,
     private readonly config: PresenceConfig,
     private readonly clock: RuntimeClock = SYSTEM_RUNTIME_CLOCK,
-    private readonly detectOfficialHook: OfficialHookDetector = officialHookDetected,
+    private readonly detectOfficialHook: OfficialHookDetector = (signal) => officialHookDetected(process.env, signal),
+    private readonly resolveSocketPath: SocketPathResolver = resolveCmuxSocketPath,
   ) {}
 
   handlePresenceUpdate(payload: unknown): void {
@@ -181,7 +205,7 @@ export class PresenceRuntime {
         this.invalidateSubagentNotifications();
       }
       if (result.removed) {
-        void this.client?.clearStatus(this.statusKey(event.source.id));
+        this.clearRemovedStatus(this.statusKey(event.source.id));
       }
       this.renderProgress();
       if (!this.officialHook && this.config.metaBlock) {
@@ -217,6 +241,8 @@ export class PresenceRuntime {
 
   async startSession(context: unknown): Promise<void> {
     const epoch = ++this.sessionEpoch;
+    this.officialHookProbeAbort?.abort();
+    this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
     const previousSession = this.detachCurrentSession();
@@ -227,32 +253,35 @@ export class PresenceRuntime {
     if (epoch !== this.sessionEpoch || nextSessionId === null) return;
 
     this.beginSession(nextSessionId, context);
-    const detectedOfficialHook = await this.detectOfficialHook();
+    const detectedOfficialHook = await this.detectOfficialHookWithinDeadline();
     if (!this.isCurrent(epoch, nextSessionId)) return;
     this.officialHook = detectedOfficialHook;
 
     const identity = readCmuxIdentity();
     this.statusScope = identity?.surfaceId;
-    const socketPath = identity ? await resolveCmuxSocketPath() : null;
+    const socketPath = identity ? await this.resolveSocketPathWithinDeadline() : null;
     if (!this.isCurrent(epoch, nextSessionId)) return;
 
     if (identity && socketPath) {
       const created = new PresenceClient(
         identity,
-        new UnixSocketTransport(socketPath, this.config.timeoutMs, this.config.maxQueue),
+        new UnixSocketTransport(
+          socketPath,
+          this.config.timeoutMs,
+          this.config.maxQueue,
+          this.fingerprintGate,
+        ),
         this.config,
       );
-      await created.initialize();
-      if (!this.isCurrent(epoch, nextSessionId)) {
-        await created.close();
-        return;
-      }
-      await created.initializeOwnedProgress();
-      if (!this.isCurrent(epoch, nextSessionId)) {
-        await created.close();
-        return;
-      }
+      // Publish ownership before either asynchronous initialization step. A
+      // replacement or shutdown can then detach this client and serialize its
+      // close through the existing bounded teardown barrier.
       this.client = created;
+      await created.initialize();
+      if (!this.isCurrent(epoch, nextSessionId)) return;
+      // This runs only after the client is the current runtime owner.
+      await created.initializeOwnedProgress();
+      if (!this.isCurrent(epoch, nextSessionId)) return;
     }
 
     await this.initializeOptionalIntegrations(nextSessionId);
@@ -384,6 +413,8 @@ export class PresenceRuntime {
 
   async shutdownSession(): Promise<void> {
     ++this.sessionEpoch;
+    this.officialHookProbeAbort?.abort();
+    this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
     const closingSession = this.detachCurrentSession();
@@ -443,6 +474,7 @@ export class PresenceRuntime {
       officialHook: this.officialHook,
       statusScope: this.statusScope,
       retainedEvents: this.registry.snapshot(),
+      pendingStatusClears: this.pendingStatusClears,
     };
     this.client = null;
     this.disableCurrentSession();
@@ -451,6 +483,9 @@ export class PresenceRuntime {
 
   private disableCurrentSession(): void {
     this.registry.stop();
+    // Keep detached attempts alive for their in-flight acknowledgements while
+    // giving a replacement session an independent, bounded cleanup scope.
+    this.pendingStatusClears = new Map();
     this.contextProvider = null;
     this.sessionId = null;
     this.localSequence = 0;
@@ -474,6 +509,83 @@ export class PresenceRuntime {
 
   private isCurrent(epoch: number, sessionId: string): boolean {
     return epoch === this.sessionEpoch && sessionId === this.sessionId;
+  }
+
+  /**
+   * Bound pre-socket official-hook authority. An unabortable detector remains
+   * exclusive until settlement; timeout, abort, and detector errors fail closed.
+   */
+  private async detectOfficialHookWithinDeadline(): Promise<boolean> {
+    if (this.unresolvedOfficialHookProbe) return true;
+
+    const controller = new AbortController();
+    this.officialHookProbeAbort = controller;
+    let probe: Promise<boolean>;
+    try {
+      probe = Promise.resolve(this.detectOfficialHook(controller.signal));
+    } catch {
+      if (this.officialHookProbeAbort === controller) this.officialHookProbeAbort = null;
+      return true;
+    }
+    let settled!: Promise<void>;
+    settled = probe.then(() => {}, () => {}).finally(() => {
+      if (this.unresolvedOfficialHookProbe === settled) this.unresolvedOfficialHookProbe = null;
+    });
+    this.unresolvedOfficialHookProbe = settled;
+
+    let removeAbort = () => {};
+    const uncertain = new Promise<boolean>((resolve) => {
+      const abort = () => resolve(true);
+      controller.signal.addEventListener("abort", abort, { once: true });
+      removeAbort = () => controller.signal.removeEventListener("abort", abort);
+    });
+    const timer = this.clock.setTimeout(() => controller.abort(), this.config.timeoutMs);
+    timer.unref?.();
+
+    try {
+      return await Promise.race([probe.then((detected) => detected, () => true), uncertain]);
+    } finally {
+      this.clock.clearTimeout(timer);
+      removeAbort();
+      if (this.officialHookProbeAbort === controller) this.officialHookProbeAbort = null;
+    }
+  }
+
+  /**
+   * Bound pre-ownership filesystem resolution. A resolver cannot be aborted,
+   * so a deadline/epoch only abandons its result; it remains exclusive until
+   * settlement rather than allowing another filesystem validation to pile up.
+   */
+  private async resolveSocketPathWithinDeadline(): Promise<string | null> {
+    if (this.unresolvedSocketResolution) return null;
+
+    const controller = new AbortController();
+    this.socketResolutionAbort = controller;
+    const resolution = this.resolveSocketPath().catch(() => null);
+    let settled!: Promise<void>;
+    settled = resolution.then(() => {}, () => {}).finally(() => {
+      if (this.unresolvedSocketResolution === settled) this.unresolvedSocketResolution = null;
+    });
+    this.unresolvedSocketResolution = settled;
+
+    let removeAbort = () => {};
+    const cancelled = new Promise<null>((resolve) => {
+      const abort = () => resolve(null);
+      controller.signal.addEventListener("abort", abort, { once: true });
+      removeAbort = () => controller.signal.removeEventListener("abort", abort);
+    });
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    timer.unref?.();
+
+    try {
+      // The resolver itself is read-only validation. Racing it keeps a stalled
+      // filesystem operation from owning a lifecycle transition or client.
+      return await Promise.race([resolution, cancelled]);
+    } finally {
+      clearTimeout(timer);
+      removeAbort();
+      if (this.socketResolutionAbort === controller) this.socketResolutionAbort = null;
+    }
   }
 
   private async initializeOptionalIntegrations(sessionId: string): Promise<void> {
@@ -873,6 +985,25 @@ export class PresenceRuntime {
     }
   }
 
+  /**
+   * A remove is already accepted in the event registry before this observer
+   * write. Track only an actual clear issued through the captured current
+   * client. The token prevents an older acknowledgement from erasing a newer
+   * failed remove for the same status key.
+   */
+  private clearRemovedStatus(key: string): void {
+    const client = this.client;
+    if (!client || !this.config.sidebar) return;
+
+    const intents = this.pendingStatusClears;
+    const token = {};
+    const outcome = client.clearStatus(key).catch(() => false);
+    intents.set(key, { token, client, outcome });
+    void outcome.then((acknowledged) => {
+      if (acknowledged && intents.get(key)?.token === token) intents.delete(key);
+    });
+  }
+
   private renderProgress(): void {
     const next = selectProgress(this.registry.snapshot());
     if (!next) {
@@ -1024,14 +1155,37 @@ export class PresenceRuntime {
       };
       const timer = setTimeout(abort, budgetMs);
       try {
-        const bestEffort = async (operation: () => Promise<void>) => {
+        const bestEffort = async (operation: () => Promise<unknown>) => {
           if (expired) return;
           await operation().catch(() => {});
         };
 
+        // Resolve pending removal clears first: a hung progress teardown must
+        // not consume the aggregate cleanup budget before their one retry.
+        // A retained source reactivated after a failed remove shares its exact
+        // key with that retry, so consume the key here rather than issuing a
+        // duplicate retained-event clear below.
+        const retainedStatusKeys = new Set(
+          detached.retainedEvents.map((event) => presenceStatusKey(event.source.id, detached.statusScope)),
+        );
+        for (const [key, attempt] of detached.pendingStatusClears) {
+          let acknowledged = false;
+          if (!expired) {
+            try {
+              acknowledged = await attempt.outcome;
+            } catch {
+              // A failed observer write gets one teardown retry below.
+            }
+          }
+          const clearsRetainedStatus = retainedStatusKeys.delete(key);
+          if (!acknowledged || clearsRetainedStatus) {
+            await bestEffort(() => attempt.client.clearStatus(key));
+          }
+        }
+
         await bestEffort(() => client.clearProgress());
-        for (const event of detached.retainedEvents) {
-          await bestEffort(() => client.clearStatus(presenceStatusKey(event.source.id, detached.statusScope)));
+        for (const key of retainedStatusKeys) {
+          await bestEffort(() => client.clearStatus(key));
         }
 
         if (!detached.officialHook) {

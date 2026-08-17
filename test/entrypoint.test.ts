@@ -172,30 +172,57 @@ async function presenceFixture(
   firstCapabilityGate?: () => Promise<void>,
   requestGate?: (line: string) => Promise<void>,
   advertisedMethods = ["notification.create_for_surface"],
+  v1Response?: (line: string) => string | Promise<string>,
+  v2Response?: (request: { id: number; method: string; params: Record<string, unknown> }) => unknown,
 ) {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const surfaceId = "00000000-0000-4000-8000-000000000002";
   const lines: string[] = [];
   const requests: Array<{ line: string; at: number }> = [];
+  const requestWaiters = new Set<{
+    predicate: (line: string) => boolean;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  const nextRequest = (predicate: (line: string) => boolean, timeoutMs = 1_000): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          requestWaiters.delete(waiter);
+          reject(new Error("Timed out waiting for fake socket request."));
+        }, timeoutMs),
+      };
+      requestWaiters.add(waiter);
+    });
   const directory = await fs.mkdtemp(join(os.tmpdir(), "presence-lifecycle-"));
   const socketPath = join(directory, "cmux.sock");
   let capabilityRequests = 0;
   const server = await fakeSocket(socketPath, async (line) => {
     lines.push(line);
     requests.push({ line, at: performance.now() });
+    for (const waiter of requestWaiters) {
+      if (!waiter.predicate(line)) continue;
+      requestWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
     await requestGate?.(line);
     if (line.startsWith("{")) {
-      const request = JSON.parse(line) as { id: number; method: string };
+      const request = JSON.parse(line) as { id: number; method: string; params: Record<string, unknown> };
       if (request.method === "system.capabilities") {
         capabilityRequests += 1;
         if (capabilityRequests === 1) await firstCapabilityGate?.();
       }
       const result = request.method === "system.capabilities"
         ? { protocol: "cmux-socket", version: 2, methods: advertisedMethods }
-        : {};
+        : v2Response?.(request) ?? {};
       return JSON.stringify({ id: request.id, ok: true, result });
     }
-    return "OK";
+    return await v1Response?.(line) ?? "OK";
   });
   const restoreEnv = replaceEnv({
     CMUX_WORKSPACE_ID: workspaceId,
@@ -212,8 +239,18 @@ async function presenceFixture(
     PI_CMUX_PRESENCE_FINAL_CLEAR_MS: "60000",
   });
   return {
-    workspaceId, surfaceId, lines, requests,
-    cleanup: async () => { restoreEnv(); await server.close(); await fs.rm(directory, { recursive: true, force: true }); },
+    workspaceId, surfaceId, lines, requests, nextRequest,
+    activeConnections: server.activeConnections,
+    cleanup: async () => {
+      restoreEnv();
+      for (const waiter of requestWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("Fake socket fixture closed before the expected request."));
+      }
+      requestWaiters.clear();
+      await server.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    },
   };
 }
 
@@ -539,13 +576,14 @@ test("removal clears only retained external status, reselects progress, recomput
       counts: { active: 1, completed: 0, failed: attention === "error" ? 1 : 0 },
       progress: { value: progress, label }, attention,
     });
-    update("remove-first", "First", 1, 0.25, "error");
-    update("remove-second", "Second", 1, 0.75, "none");
     const firstKey = presenceStatusKey("remove-first", fixture.surfaceId);
     const secondKey = presenceStatusKey("remove-second", fixture.surfaceId);
-    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${firstKey} `))
-      && fixture.lines.some((line) => line.startsWith(`set_status ${secondKey} `))
-      && fixture.lines.some((line) => line.startsWith("set_progress ")));
+    const firstStatus = fixture.nextRequest((line) => line.startsWith(`set_status ${firstKey} `));
+    const secondStatus = fixture.nextRequest((line) => line.startsWith(`set_status ${secondKey} `));
+    const initialProgress = fixture.nextRequest((line) => line.startsWith("set_progress "));
+    update("remove-first", "First", 1, 0.25, "error");
+    update("remove-second", "Second", 1, 0.75, "none");
+    await Promise.all([firstStatus, secondStatus, initialProgress]);
     const beforeRemoval = {
       logs: fixture.lines.filter((line) => line.startsWith("log --level=")).length,
       notifications: fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"')).length,
@@ -554,12 +592,15 @@ test("removal clears only retained external status, reselects progress, recomput
       metadata: fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length,
     };
 
+    const firstClear = fixture.nextRequest((line) => line.startsWith(`clear_status ${firstKey} `));
+    const reselectedProgress = fixture.nextRequest((line) => line.startsWith("set_progress ") && line.includes('"Second"'));
+    const firstRemovalMetaRequest = fixture.nextRequest((line) => line.startsWith("report_meta_block ")
+      && line.endsWith(" -- 1\\n0\\n0\\n0\\n0\\n0\\n0\\n0.00\\n0"));
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "remove-first" } });
-    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`clear_status ${firstKey} `)).length === 1
-      && fixture.lines.filter((line) => line.startsWith("set_progress ")).some((line) => line.includes('"Second"'))
-      && fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length > beforeRemoval.metadata);
+    await Promise.all([firstClear, reselectedProgress, firstRemovalMetaRequest]);
     const firstRemovalMeta = fixture.lines.filter((line) => line.startsWith("report_meta_block ")).at(-1)!;
     expect(firstRemovalMeta.slice(firstRemovalMeta.indexOf(" -- ") + 4)).toBe("1\\n0\\n0\\n0\\n0\\n0\\n0\\n0.00\\n0");
+    expect(fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length).toBeGreaterThan(beforeRemoval.metadata);
     expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `))).toHaveLength(0);
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(fixture.lines.filter((line) => line.startsWith("log --level="))).toHaveLength(beforeRemoval.logs);
@@ -567,15 +608,273 @@ test("removal clears only retained external status, reselects progress, recomput
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(beforeRemoval.flashes);
     expect(fixture.lines.filter((line) => line.includes('"method":"feed.push"'))).toHaveLength(beforeRemoval.feeds);
 
-    const progressClearsBeforeSecond = fixture.lines.filter((line) => line.startsWith("clear_progress ")).length;
+    const secondClear = fixture.nextRequest((line) => line.startsWith(`clear_status ${secondKey} `));
+    const progressClear = fixture.nextRequest((line) => line.startsWith("clear_progress "));
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "remove-second" } });
-    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `)).length === 1
-      && fixture.lines.filter((line) => line.startsWith("clear_progress ")).length > progressClearsBeforeSecond);
+    await Promise.all([secondClear, progressClear]);
     const statusClearsAfterSecond = fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `)).length;
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 3, source: { id: "remove-second" } });
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `))).toHaveLength(statusClearsAfterSecond);
     await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("failed accepted removal clear is retried once at teardown without new presentation or attention", async () => {
+  let removalKey = "";
+  let firstClearResponded = false;
+  let failFirstClear = true;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    ["notification.create_for_surface", "surface.trigger_flash"],
+    (line) => {
+      if (failFirstClear && removalKey && line.startsWith(`clear_status ${removalKey} `)) {
+        failFirstClear = false;
+        firstClearResponded = true;
+        return "NOT OK";
+      }
+      return "OK";
+    },
+  );
+  try {
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_FLASH_POLICY = "attention";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-retry-session";
+    const sourceId = "remove-clear-retry";
+    removalKey = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Retry source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${removalKey} `)));
+    const updatesBeforeRemove = pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).length;
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => firstClearResponded);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${removalKey} `))).toHaveLength(1);
+    expect(pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)).toHaveLength(updatesBeforeRemove);
+    expect(fixture.lines.filter((line) => line.startsWith(`set_status ${removalKey} `))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+
+    await pi.lifecycle("session_shutdown");
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${removalKey} `))).toHaveLength(2);
+    expect(fixture.lines.filter((line) => line.startsWith(`set_status ${removalKey} `))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+  } finally { await fixture.cleanup(); }
+});
+
+test("failed removal retry precedes a hanging teardown progress clear within the cleanup deadline", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  let hangTeardownProgressClear = false;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearAttempts += 1;
+        return clearAttempts === 1 ? "NOT OK" : "OK";
+      }
+      if (hangTeardownProgressClear && line.startsWith("clear_progress ")) {
+        await new Promise<void>(() => {});
+      }
+      return "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-before-progress-session";
+    const sourceId = "remove-clear-before-progress";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Priority source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearAttempts === 1);
+    hangTeardownProgressClear = true;
+    const teardownStart = fixture.lines.length;
+    const started = performance.now();
+    await pi.lifecycle("session_shutdown");
+
+    const teardownLines = fixture.lines.slice(teardownStart);
+    expect(teardownLines[0]).toBe(`clear_status ${key} --tab=${fixture.workspaceId}`);
+    expect(teardownLines[1]).toBe(`clear_progress --tab=${fixture.workspaceId}`);
+    expect(clearAttempts).toBe(2);
+    expect(performance.now() - started).toBeLessThan(1_100);
+  } finally { await fixture.cleanup(); }
+});
+
+test("an in-flight acknowledged removal clear is awaited at progress-disabled teardown without a retry", async () => {
+  let key = "";
+  let clearStarted = false;
+  let releaseClear!: () => void;
+  const clearGate = new Promise<void>((resolve) => { releaseClear = resolve; });
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearStarted = true;
+        await clearGate;
+      }
+      return "OK";
+    },
+  );
+  try {
+    process.env.PI_CMUX_PRESENCE_PROGRESS = "false";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-acknowledged-session";
+    const sourceId = "remove-clear-acknowledged";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Acknowledged source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearStarted);
+    const shutdown = pi.lifecycle("session_shutdown");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(1);
+
+    releaseClear();
+    await shutdown;
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(1);
+  } finally { await fixture.cleanup(); }
+});
+
+test("removal during capability initialization creates one owned clear intent", async () => {
+  const sessionId = "remove-pre-client-session";
+  const sourceId = "remove-pre-client";
+  let pi: ReturnType<typeof fakePi>;
+  const fixture = await presenceFixture(async () => {
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Pre-client source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId },
+    });
+  });
+  try {
+    pi = fakePi();
+    extension(pi.api as never);
+    const key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("session_shutdown");
+
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(1);
+  } finally { await fixture.cleanup(); }
+});
+
+test("an older clear acknowledgement cannot erase a newer failed removal intent", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  let firstClearStarted = false;
+  let releaseFirstClear!: () => void;
+  const firstClearGate = new Promise<void>((resolve) => { releaseFirstClear = resolve; });
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (!key || !line.startsWith(`clear_status ${key} `)) return "OK";
+      clearAttempts += 1;
+      if (clearAttempts === 1) {
+        firstClearStarted = true;
+        await firstClearGate;
+        return "OK";
+      }
+      return clearAttempts === 2 ? "NOT OK" : "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-overlap-session";
+    const sourceId = "remove-overlap";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: sourceId, label: "Overlapping source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    update(1);
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => firstClearStarted);
+    update(3);
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 4, source: { id: sourceId } });
+
+    releaseFirstClear();
+    await waitFor(() => clearAttempts === 2);
+    await pi.lifecycle("session_shutdown");
+
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(3);
+  } finally { await fixture.cleanup(); }
+});
+
+test("a failed removal followed by reactivation uses one teardown clear for the retained source", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearAttempts += 1;
+        return clearAttempts === 1 ? "NOT OK" : "OK";
+      }
+      return "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-reactivated-session";
+    const sourceId = "remove-reactivated";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: sourceId, label: "Reactivated source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    update(1);
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearAttempts === 1);
+    update(3);
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} `)).length === 2);
+
+    await pi.lifecycle("session_shutdown");
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(2);
   } finally { await fixture.cleanup(); }
 });
 
@@ -1346,11 +1645,15 @@ test("an invalid replacement session clears the previous session outputs", async
 });
 
 test("detached cleanup sends every retained status clear beyond one close timeout", async () => {
-  const responseDelayMs = 6;
+  const requestTimeoutMs = 500;
+  const responseDelayMs = 15;
   const fixture = await presenceFixture(undefined, async () => {
     await new Promise<void>((resolve) => setTimeout(resolve, responseDelayMs));
   });
   try {
+    // Forty serial clears exceed one request timeout (600ms > 500ms), while
+    // the derived aggregate cleanup budget is 2s and leaves load headroom.
+    process.env.PI_CMUX_PRESENCE_TIMEOUT_MS = String(requestTimeoutMs);
     const pi = fakePi();
     extension(pi.api as never);
     const sessionId = "cleanup-tail-session";
@@ -1377,7 +1680,7 @@ test("detached cleanup sends every retained status clear beyond one close timeou
       const key = presenceStatusKey(`retained-${index}`, fixture.surfaceId);
       expect(clears.some((request) => request.line.startsWith(`clear_status ${key} `))).toBe(true);
     }
-    expect(clears.at(-1)!.at - clears[0]!.at).toBeGreaterThan(100);
+    expect(clears.at(-1)!.at - clears[0]!.at).toBeGreaterThan(requestTimeoutMs);
   } finally {
     await fixture.cleanup();
   }
@@ -1450,7 +1753,143 @@ test("shutdown teardown finishes before a concurrently started session publishes
   }
 });
 
-test("a session change during owned-progress setup does not retain the stale client", async () => {
+test("shutdown waits for the owned client during capability initialization", async () => {
+  let releaseCapability!: () => void;
+  const capabilityGate = new Promise<void>((resolve) => { releaseCapability = resolve; });
+  const fixture = await presenceFixture(() => capabilityGate);
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const start = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "capability-shutdown-old" },
+    });
+    await waitFor(() => fixture.lines.some((line) => line.includes('"method":"system.capabilities"')));
+    expect(fixture.activeConnections()).toBe(1);
+
+    let shutdownComplete = false;
+    const shutdown = pi.lifecycle("session_shutdown").then(() => { shutdownComplete = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(shutdownComplete).toBe(false);
+
+    releaseCapability();
+    await Promise.all([start, shutdown]);
+    await waitFor(() => fixture.activeConnections() === 0);
+    expect(pi.emitted).toEqual([]);
+    expect(fixture.lines.filter((line) => line.includes('"method":"system.capabilities"'))).toHaveLength(1);
+    expect(fixture.lines.filter((line) => line.startsWith("clear_progress "))).toHaveLength(1);
+  } finally {
+    releaseCapability();
+    await fixture.cleanup();
+  }
+});
+
+test("replacement waits for capability-initializing client teardown before publishing or installing", async () => {
+  let releaseCapability!: () => void;
+  const capabilityGate = new Promise<void>((resolve) => { releaseCapability = resolve; });
+  let installedSession: string | null = null;
+  const fixture = await presenceFixture(
+    () => capabilityGate,
+    undefined,
+    ["surface.resume.get", "surface.resume.set", "surface.resume.clear"],
+    undefined,
+    (request) => {
+      if (request.method === "surface.resume.get") {
+        return {
+          resume_binding: installedSession === null
+            ? null
+            : { kind: "pi", source: "agent-hook", checkpoint_id: installedSession },
+        };
+      }
+      if (request.method === "surface.resume.set") {
+        installedSession = typeof request.params.checkpoint_id === "string"
+          ? request.params.checkpoint_id
+          : null;
+      }
+      return {};
+    },
+  );
+  try {
+    process.env.PI_CMUX_PRESENCE_RESUME_FALLBACK = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const first = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "capability-replacement-old" },
+    });
+    await waitFor(() => fixture.lines.some((line) => line.includes('"method":"system.capabilities"')));
+
+    let replacementComplete = false;
+    const second = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "capability-replacement-current" },
+    }).then(() => { replacementComplete = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(replacementComplete).toBe(false);
+    expect(fixture.lines.filter((line) => line.includes('"method":"system.capabilities"'))).toHaveLength(1);
+
+    releaseCapability();
+    await Promise.all([first, second]);
+    await waitFor(() => fixture.activeConnections() === 0);
+    const capabilityIndices = fixture.lines
+      .map((line, index) => line.includes('"method":"system.capabilities"') ? index : -1)
+      .filter((index) => index >= 0);
+    const oldCleanupIndex = fixture.lines.findIndex((line) => line.startsWith("clear_progress "));
+    expect(capabilityIndices).toHaveLength(2);
+    expect(oldCleanupIndex).toBeGreaterThan(capabilityIndices[0]!);
+    expect(capabilityIndices[1]!).toBeGreaterThan(oldCleanupIndex);
+    const localUpdates = pi.emitted
+      .filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)
+      .map((event) => event.payload as PresenceUpdate);
+    expect(localUpdates).toHaveLength(1);
+    expect(localUpdates[0]?.sessionId).toBe("capability-replacement-current");
+    const installs = fixture.lines
+      .filter((line) => line.includes('"method":"surface.resume.set"'))
+      .map((line) => JSON.parse(line) as { params: { checkpoint_id: string } });
+    expect(installs).toEqual([expect.objectContaining({
+      params: expect.objectContaining({ checkpoint_id: "capability-replacement-current" }),
+    })]);
+    expect(fixture.lines.some((line) => line.includes("capability-replacement-old"))).toBe(false);
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    releaseCapability();
+    await fixture.cleanup();
+  }
+});
+
+test("shutdown waits for the owned client during owned-progress initialization", async () => {
+  let releaseProgress!: () => void;
+  const progressGate = new Promise<void>((resolve) => { releaseProgress = resolve; });
+  let blockFirstProgressClear = true;
+  const fixture = await presenceFixture(undefined, async (line) => {
+    if (blockFirstProgressClear && line.startsWith("clear_progress ")) {
+      blockFirstProgressClear = false;
+      await progressGate;
+    }
+  });
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const start = pi.lifecycle("session_start", {}, {
+      sessionManager: { getSessionId: () => "owned-progress-shutdown-old" },
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith("clear_progress ")));
+    expect(fixture.activeConnections()).toBe(1);
+
+    let shutdownComplete = false;
+    const shutdown = pi.lifecycle("session_shutdown").then(() => { shutdownComplete = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(shutdownComplete).toBe(false);
+
+    releaseProgress();
+    await Promise.all([start, shutdown]);
+    await waitFor(() => fixture.activeConnections() === 0);
+    expect(pi.emitted).toEqual([]);
+    expect(fixture.lines.filter((line) => line.startsWith("clear_progress "))).toHaveLength(2);
+  } finally {
+    releaseProgress();
+    await fixture.cleanup();
+  }
+});
+
+test("replacement waits for owned-progress-initializing client teardown before publishing", async () => {
   let releaseProgress!: () => void;
   const progressGate = new Promise<void>((resolve) => { releaseProgress = resolve; });
   let blockFirstProgressClear = true;
@@ -1464,65 +1903,38 @@ test("a session change during owned-progress setup does not retain the stale cli
     const pi = fakePi();
     extension(pi.api as never);
     const first = pi.lifecycle("session_start", {}, {
-      sessionManager: { getSessionId: () => "owned-progress-old" },
+      sessionManager: { getSessionId: () => "owned-progress-replacement-old" },
     });
     await waitFor(() => fixture.lines.some((line) => line.startsWith("clear_progress ")));
 
+    let replacementComplete = false;
     const second = pi.lifecycle("session_start", {}, {
-      sessionManager: { getSessionId: () => "owned-progress-current" },
-    });
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    const completed = await Promise.race([
-      second.then(() => true),
-      new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 100); }),
-    ]);
-    if (deadline) clearTimeout(deadline);
-    expect(completed).toBe(true);
-    expect(pi.emitted.some((event) => (event.payload as PresenceUpdate).sessionId === "owned-progress-current")).toBe(true);
+      sessionManager: { getSessionId: () => "owned-progress-replacement-current" },
+    }).then(() => { replacementComplete = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(replacementComplete).toBe(false);
+    expect(fixture.lines.filter((line) => line.includes('"method":"system.capabilities"'))).toHaveLength(1);
 
     releaseProgress();
-    await first;
+    await Promise.all([first, second]);
+    await waitFor(() => fixture.activeConnections() === 0);
+    const capabilityIndices = fixture.lines
+      .map((line, index) => line.includes('"method":"system.capabilities"') ? index : -1)
+      .filter((index) => index >= 0);
+    const progressIndices = fixture.lines
+      .map((line, index) => line.startsWith("clear_progress ") ? index : -1)
+      .filter((index) => index >= 0);
+    expect(capabilityIndices).toHaveLength(2);
+    expect(progressIndices).toHaveLength(3);
+    expect(capabilityIndices[1]!).toBeGreaterThan(progressIndices[1]!);
+    const localUpdates = pi.emitted
+      .filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)
+      .map((event) => event.payload as PresenceUpdate);
+    expect(localUpdates).toHaveLength(1);
+    expect(localUpdates[0]?.sessionId).toBe("owned-progress-replacement-current");
     await pi.lifecycle("session_shutdown");
   } finally {
     releaseProgress();
-    await fixture.cleanup();
-  }
-});
-
-test("a delayed stale capability probe cannot clear newer session progress", async () => {
-  let releaseCapability!: () => void;
-  const capabilityGate = new Promise<void>((resolve) => { releaseCapability = resolve; });
-  const fixture = await presenceFixture(() => capabilityGate);
-  try {
-    const pi = fakePi();
-    extension(pi.api as never);
-    const first = pi.lifecycle("session_start", {}, {
-      sessionManager: { getSessionId: () => "delayed-old-session" },
-    });
-    await waitFor(() => fixture.lines.some((line) => line.includes('"method":"system.capabilities"')));
-
-    await pi.lifecycle("session_start", {}, {
-      sessionManager: { getSessionId: () => "current-session" },
-    });
-    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
-      version: 1,
-      sessionId: "current-session",
-      generation: 1,
-      sequence: 1,
-      source: { id: "progress-owner", label: "Progress owner", kind: "task" },
-      state: "running",
-      counts: { active: 1, completed: 0, failed: 0 },
-      progress: { value: 0.5, label: "Current progress" },
-    });
-    await waitFor(() => fixture.lines.some((line) => line.startsWith("set_progress ")));
-    const progressIndex = fixture.lines.findIndex((line) => line.startsWith("set_progress "));
-
-    releaseCapability();
-    await first;
-    expect(fixture.lines.slice(progressIndex + 1).some((line) => line.startsWith("clear_progress"))).toBe(false);
-    await pi.lifecycle("session_shutdown");
-  } finally {
-    releaseCapability();
     await fixture.cleanup();
   }
 });
