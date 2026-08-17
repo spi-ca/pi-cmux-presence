@@ -24,8 +24,9 @@ flowchart TB
 
   subgraph Exchange[transport.ts: exchange]
     direction LR
-    Before[Fingerprint socket<br/>before connect] --> Connect[net.createConnection]
-    Connect --> After[Fingerprint socket<br/>after connect]
+    Before[Fingerprint lease gate + intrinsic<br/>safe fingerprint before connect] --> Connect[net.createConnection]
+    Connect --> Pending[Post-connect fingerprint pending:<br/>lease held; write blocked]
+    Pending --> After[Fingerprint settles:<br/>compare before and after]
     After -->|mismatch| Changed[Reject: socket<br/>changed during connection]
     After -->|match| Write[Write request line]
     Write --> Read[Read until single<br/>newline-terminated line]
@@ -33,7 +34,13 @@ flowchart TB
     Read -->|end or close before<br/>complete LF response| Incomplete[Reject immediately:<br/>incomplete response]
     Read -->|newline seen but<br/>extra bytes follow it| MultiLine[Reject: more than<br/>one response line]
     Read -->|exactly one LF-terminated line| Ok[Resolve response line]
-    Connect -.timeout, abort signal,<br/>or socket error.-> Failed[Reject: timeout,<br/>aborted, or socket failure]
+    Before -.deadline or abort.-> Failed[Reject current request:<br/>transport remains usable]
+    Connect -.error, timeout, or abort<br/>before connect.-> Failed
+    Pending -.deadline or abort while<br/>fingerprint unresolved.-> Poison[Fail-close transport:<br/>abort active, reject queued]
+    Pending -.early data/end/close/error.-> Poison
+    Poison --> Held[Runtime-shared fingerprint gate retains<br/>the stale lease until it settles]
+    Held --> Refuse[Replacement transport refuses<br/>new validation; late release fenced]
+    Held --> Release[Lease settles: later validation<br/>may acquire it]
   end
 
   subgraph CloseLifecycle[UnixSocketTransport.close timeoutMs]
@@ -47,5 +54,5 @@ flowchart TB
   end
 
   class Push,Drain,Active,Write,Read,Ok core
-  class Enqueue,Closed,Coalesce,Merge,Bound,Before,Connect,After,CloseCall,MarkClosed,Race boundary
-  class RejectClosed,RejectFull,Changed,TooLarge,Incomplete,MultiLine,Failed,ImmediateAbort,Abandon,Settled,Idle boundary
+  class Enqueue,Closed,Coalesce,Merge,Bound,Before,Connect,Pending,After,CloseCall,MarkClosed,Race boundary
+  class RejectClosed,RejectFull,Changed,TooLarge,Incomplete,MultiLine,Failed,Poison,ImmediateAbort,Abandon,Settled,Idle boundary

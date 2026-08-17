@@ -7,12 +7,14 @@ export type FakeSocketResponse = string | undefined | { end: true };
 export async function fakeSocket(
   path: string,
   handler: (line: string) => FakeSocketResponse | Promise<FakeSocketResponse>,
+  options?: { onConnection?: (socket: net.Socket) => void },
 ): Promise<{ close(): Promise<void>; activeConnections(): number }> {
   await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const connections = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     connections.add(socket);
     socket.once("close", () => connections.delete(socket));
+    options?.onConnection?.(socket);
     socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", async (chunk: string) => {

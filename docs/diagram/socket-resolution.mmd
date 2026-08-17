@@ -21,11 +21,31 @@ flowchart TB
     Fingerprint -->|ok| ValidSocket[Validated socket path<br/>+ dev/ino/uid fingerprint]
   end
 
+  subgraph Startup[Runtime startup path resolution]
+    direction LR
+    StartEpoch[Session epoch starts] --> Exclusive{Older resolver<br/>still unresolved?}
+    Exclusive -->|yes| SkipResolver[Skip this epoch's resolver;<br/>never reuse stale result]
+    Exclusive -->|no| Resolve[Resolve configured/stable path]
+    Resolve --> Deadline{Deadline or epoch<br/>abort first?}
+    Deadline -->|yes| Stale[Abandon result; keep one<br/>resolver exclusive until settle]
+    Deadline -->|no| ValidSocket
+    Stale --> Settles[Stale resolver settles;<br/>future epoch may retry]
+  end
+
   CmuxIdentity --> Gate
   ValidSocket --> Gate
   Gate{Identity and socket<br/>both resolved?}
   Gate -->|no| Disabled[cmux client/output disabled;<br/>process-local observer may continue]
   Gate -->|yes| ClientCreate[Create PresenceClient +<br/>UnixSocketTransport]
+
+  subgraph TransportValidation[Runtime transport validation]
+    direction LR
+    ClientCreate --> SharedGate[One runtime-owned fingerprint lease gate:<br/>transport calls intrinsic<br/>safeSocketFingerprint directly]
+    SharedGate --> Revalidate[Before and after connect:<br/>compare dev/ino/uid]
+    Revalidate -->|data/end/close/error while a<br/>post-connect fingerprint is pending| FailClose[Reject response + fail-close queue;<br/>retain stale lease until settle]
+    FailClose --> Replacement[Session replacement refuses new<br/>validation until stale lease settles]
+    Revalidate -->|both fingerprints match<br/>then request write| Exchange[Accept one bounded response]
+  end
 
   subgraph Hook[official-hook.ts: precedence]
     direction LR
@@ -41,6 +61,6 @@ flowchart TB
   HookAbsent --> OptIn[PresenceConfig opt-in flags<br/>gate each remaining feature]
   HookOff --> OptIn
 
-  class CmuxIdentity,ValidSocket,ClientCreate core
-  class Env,Configured,Candidate1,Candidate2,Fingerprint,HookDir,HookRead,HookEnv boundary
-  class NoIdentity,NoSocket,Disabled,HookOff,HookDetected,HookAbsent,Precedence,OptIn boundary
+  class CmuxIdentity,ValidSocket,ClientCreate,SharedGate,Exchange core
+  class Env,Configured,Candidate1,Candidate2,Fingerprint,StartEpoch,Exclusive,Resolve,Deadline,Revalidate,HookDir,HookRead,HookEnv boundary
+  class NoIdentity,NoSocket,SkipResolver,Stale,Settles,Disabled,FailClose,Replacement,HookOff,HookDetected,HookAbsent,Precedence,OptIn boundary

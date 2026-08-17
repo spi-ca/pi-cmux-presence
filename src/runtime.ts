@@ -38,7 +38,7 @@ import {
   selectProgress,
 } from "./presentation.js";
 import { TodoProgressAdapter } from "./todo.js";
-import { UnixSocketTransport } from "./transport.js";
+import { UnresolvedSocketFingerprintGate, UnixSocketTransport } from "./transport.js";
 import { UsageTracker } from "./usage.js";
 
 const LOCAL_SOURCE = { id: "pi", label: "Pi", kind: "agent" };
@@ -48,6 +48,7 @@ type ContextProvider = { getContextUsage?: () => unknown };
 type TerminalState = "success" | "error" | "cancelled";
 type ToolFeedEvent = { toolCallId?: unknown; toolName?: unknown };
 type OfficialHookDetector = () => Promise<boolean>;
+type SocketPathResolver = () => Promise<string | null>;
 
 type RuntimeClock = {
   now(): number;
@@ -125,6 +126,12 @@ export class PresenceRuntime {
   private readonly todo = new TodoProgressAdapter();
   private client: PresenceClient | null = null;
   private clientCloseBarrier: Promise<void> = Promise.resolve();
+  /** One intrinsic fingerprint lease may remain unresolved across client replacement. */
+  private readonly fingerprintGate = new UnresolvedSocketFingerprintGate();
+  /** Cancels only the current epoch's wait for pre-ownership path resolution. */
+  private socketResolutionAbort: AbortController | null = null;
+  /** An unabortable filesystem resolver remains exclusive until it actually settles. */
+  private unresolvedSocketResolution: Promise<void> | null = null;
   /** Latest attempts only, bounded by the registry's retained-source cap. */
   private pendingStatusClears = new Map<string, StatusClearAttempt>();
   private contextProvider: ContextProvider | null = null;
@@ -163,6 +170,7 @@ export class PresenceRuntime {
     private readonly config: PresenceConfig,
     private readonly clock: RuntimeClock = SYSTEM_RUNTIME_CLOCK,
     private readonly detectOfficialHook: OfficialHookDetector = officialHookDetected,
+    private readonly resolveSocketPath: SocketPathResolver = resolveCmuxSocketPath,
   ) {}
 
   handlePresenceUpdate(payload: unknown): void {
@@ -229,6 +237,7 @@ export class PresenceRuntime {
 
   async startSession(context: unknown): Promise<void> {
     const epoch = ++this.sessionEpoch;
+    this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
     const previousSession = this.detachCurrentSession();
@@ -245,13 +254,18 @@ export class PresenceRuntime {
 
     const identity = readCmuxIdentity();
     this.statusScope = identity?.surfaceId;
-    const socketPath = identity ? await resolveCmuxSocketPath() : null;
+    const socketPath = identity ? await this.resolveSocketPathWithinDeadline() : null;
     if (!this.isCurrent(epoch, nextSessionId)) return;
 
     if (identity && socketPath) {
       const created = new PresenceClient(
         identity,
-        new UnixSocketTransport(socketPath, this.config.timeoutMs, this.config.maxQueue),
+        new UnixSocketTransport(
+          socketPath,
+          this.config.timeoutMs,
+          this.config.maxQueue,
+          this.fingerprintGate,
+        ),
         this.config,
       );
       // Publish ownership before either asynchronous initialization step. A
@@ -394,6 +408,7 @@ export class PresenceRuntime {
 
   async shutdownSession(): Promise<void> {
     ++this.sessionEpoch;
+    this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
     const closingSession = this.detachCurrentSession();
@@ -488,6 +503,43 @@ export class PresenceRuntime {
 
   private isCurrent(epoch: number, sessionId: string): boolean {
     return epoch === this.sessionEpoch && sessionId === this.sessionId;
+  }
+
+  /**
+   * Bound pre-ownership filesystem resolution. A resolver cannot be aborted,
+   * so a deadline/epoch only abandons its result; it remains exclusive until
+   * settlement rather than allowing another filesystem validation to pile up.
+   */
+  private async resolveSocketPathWithinDeadline(): Promise<string | null> {
+    if (this.unresolvedSocketResolution) return null;
+
+    const controller = new AbortController();
+    this.socketResolutionAbort = controller;
+    const resolution = this.resolveSocketPath().catch(() => null);
+    let settled!: Promise<void>;
+    settled = resolution.then(() => {}, () => {}).finally(() => {
+      if (this.unresolvedSocketResolution === settled) this.unresolvedSocketResolution = null;
+    });
+    this.unresolvedSocketResolution = settled;
+
+    let removeAbort = () => {};
+    const cancelled = new Promise<null>((resolve) => {
+      const abort = () => resolve(null);
+      controller.signal.addEventListener("abort", abort, { once: true });
+      removeAbort = () => controller.signal.removeEventListener("abort", abort);
+    });
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    timer.unref?.();
+
+    try {
+      // The resolver itself is read-only validation. Racing it keeps a stalled
+      // filesystem operation from owning a lifecycle transition or client.
+      return await Promise.race([resolution, cancelled]);
+    } finally {
+      clearTimeout(timer);
+      removeAbort();
+      if (this.socketResolutionAbort === controller) this.socketResolutionAbort = null;
+    }
   }
 
   private async initializeOptionalIntegrations(sessionId: string): Promise<void> {
