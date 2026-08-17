@@ -105,6 +105,16 @@ type SuppressedParentAttention = {
   readonly failed: number;
 };
 
+type GenericAttentionSemantic = {
+  readonly generation: number;
+  readonly state: PresenceUpdate["state"];
+  readonly attention: "info" | AttentionKind;
+  readonly completed: number;
+  readonly failed: number;
+  readonly cancelled: number;
+  readonly interactionWaiting: boolean;
+};
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -155,6 +165,8 @@ export class PresenceRuntime {
   private clearTimer: ReturnType<typeof setTimeout> | undefined;
   private subagentBaseline: SubagentTerminalBaseline | null = null;
   private subagentPending: PendingSubagentAttention | null = null;
+  /** At most one semantic attention marker per retained external source. */
+  private readonly genericAttentionBySource = new Map<string, GenericAttentionSemantic>();
   private subagentTimer: ReturnType<typeof setTimeout> | undefined;
   private subagentTimerEpoch = 0;
   private parentRunRevision = 0;
@@ -206,6 +218,7 @@ export class PresenceRuntime {
       if (event.source.id === PI_SUBAGENT_SOURCE_ID) {
         this.invalidateSubagentNotifications();
       }
+      this.genericAttentionBySource.delete(event.source.id);
       if (result.removed) {
         this.clearRemovedStatus(this.statusKey(event.source.id));
       }
@@ -463,6 +476,7 @@ export class PresenceRuntime {
     this.hadToolError = false;
     this.shownProgress = false;
     this.resetSubagentNotifications();
+    this.genericAttentionBySource.clear();
     this.parentRunRevision = 0;
     this.fencedParentRun = null;
     this.officialHook = false;
@@ -499,6 +513,7 @@ export class PresenceRuntime {
     this.hadToolError = false;
     this.shownProgress = false;
     this.resetSubagentNotifications();
+    this.genericAttentionBySource.clear();
     this.parentRunRevision = 0;
     this.fencedParentRun = null;
     this.suppressParentAttentionOnce = false;
@@ -636,17 +651,21 @@ export class PresenceRuntime {
     );
     this.renderProgress();
 
-    // An interaction wait is presentation-only and takes precedence over the
-    // exact subagent terminal aggregate, even if a producer reuses that ID.
-    if (event.source.id === PI_SUBAGENT_SOURCE_ID && !interactionPresentation) {
-      this.observeSubagentAttention(event);
-    } else {
+    // Exact pi-subagent interaction waits remain private generic input UI,
+    // but still advance/reset the cumulative terminal baseline. They cannot
+    // create a terminal aggregate of their own.
+    const exactSubagent = event.source.id === PI_SUBAGENT_SOURCE_ID;
+    if (exactSubagent) {
+      this.observeSubagentAttention(event, interactionPresentation !== null);
+    }
+    if (!exactSubagent || interactionPresentation) {
       const level = attentionLevel(event.attention);
       const suppressParentAttention = event.source.id === LOCAL_SOURCE.id && this.suppressParentAttentionOnce;
       if (suppressParentAttention) this.suppressParentAttentionOnce = false;
-      // Official hooks already own local completion attention. Generic producers
-      // remain immediate, but both native effects obey the global policies.
-      if (level && !suppressParentAttention && !(this.officialHook && event.source.id === LOCAL_SOURCE.id)) {
+      // Official hooks already own local completion attention. Generic producer
+      // attention is semantic-deduped per source before any cmux side effect.
+      if (level && this.shouldDispatchGenericAttention(event, level, interactionPresentation !== null)
+        && !suppressParentAttention && !(this.officialHook && event.source.id === LOCAL_SOURCE.id)) {
         void this.client?.log(level, label);
         if (!this.config.suppressNativeNotifications && shouldNotifyAttention(
           this.config.notificationPolicy,
@@ -668,7 +687,11 @@ export class PresenceRuntime {
         )) {
           void this.client?.flash();
         }
+      } else if (!level) {
+        this.genericAttentionBySource.delete(event.source.id);
       }
+    } else {
+      this.genericAttentionBySource.delete(event.source.id);
     }
     if (!this.officialHook && this.config.metaBlock) {
       void this.client?.meta(this.metadata());
@@ -676,7 +699,7 @@ export class PresenceRuntime {
   }
 
   /** The pi-subagent producer is cumulative and gets the only aggregate path. */
-  private observeSubagentAttention(event: PresenceUpdate): void {
+  private observeSubagentAttention(event: PresenceUpdate, suppressTerminal = false): void {
     const observation = observeSubagentTerminal(this.subagentBaseline, event);
     this.subagentBaseline = observation.baseline;
     if (observation.reset || observation.generationChanged) {
@@ -689,7 +712,9 @@ export class PresenceRuntime {
         this.dispatchSuppressedParentAttention(invalidated.parentRun);
       }
     }
-    if (!observation.terminal) return;
+    // Interaction waiting advances cumulative state and can invalidate a stale
+    // burst, but its generic input presentation must never become a terminal.
+    if (suppressTerminal || !observation.terminal) return;
 
     // A terminal arriving after an elapsed deadline starts a fresh aggregate;
     // it must not merge into the aggregate that deadline already closed.
@@ -978,6 +1003,39 @@ export class PresenceRuntime {
     this.subagentPending = null;
     this.subagentBaseline = null;
     this.suppressedParentAttention = null;
+  }
+
+  /** Decide whether this event starts a new bounded generic attention lifecycle. */
+  private shouldDispatchGenericAttention(
+    event: PresenceUpdate,
+    attention: "info" | AttentionKind,
+    interactionWaiting: boolean,
+  ): boolean {
+    const current: GenericAttentionSemantic = {
+      generation: event.generation,
+      state: event.state,
+      attention,
+      completed: event.counts.completed,
+      failed: event.counts.failed,
+      cancelled: event.counts.cancelled ?? 0,
+      interactionWaiting,
+    };
+    const previous = this.genericAttentionBySource.get(event.source.id);
+    this.genericAttentionBySource.set(event.source.id, current);
+    if (!previous
+      || previous.generation !== current.generation
+      || previous.state !== current.state
+      || previous.attention !== current.attention
+      || previous.interactionWaiting !== current.interactionWaiting) return true;
+    // An input wait repeats only after leaving the waiting lifecycle. Generic
+    // terminal counts permit a new completed/failed outcome without letting
+    // progress, labels, or active/queued churn create an alert storm.
+    if (interactionWaiting) return false;
+    return current.completed < previous.completed
+      || current.failed < previous.failed
+      || current.cancelled < previous.cancelled
+      || (attention === "error" && current.failed > previous.failed)
+      || (attention !== "error" && current.completed > previous.completed);
   }
 
   /** A pi-subagent removal invalidates its cumulative baseline and pending burst. */

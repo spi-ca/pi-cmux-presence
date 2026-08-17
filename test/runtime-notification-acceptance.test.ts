@@ -286,6 +286,100 @@ test("interaction waiting takes precedence over the exact subagent terminal aggr
   }
 });
 
+test("exact pi-subagent interaction updates reset terminal baseline without a terminal alert", async () => {
+  const socket = await fixture();
+  try {
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig());
+    const sessionId = "subagent-interaction-baseline-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    const update = (
+      generation: number,
+      sequence: number,
+      source: PresenceUpdate["source"],
+      state: PresenceUpdate["state"],
+      failed: number,
+      attention: PresenceUpdate["attention"],
+    ) => runtime.handlePresenceUpdate({
+      version: 1, sessionId, generation, sequence, source, state,
+      counts: { active: 0, completed: 0, failed }, attention,
+    });
+
+    update(1, 1, { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, "idle", 0, "none");
+    update(1, 2, { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, "error", 1, "error");
+    // This same-generation interaction count reset is not a terminal. It
+    // cancels the prior error burst while establishing the new zero baseline.
+    update(1, 3, { id: "pi-subagent", label: "PRIVATE INPUT", kind: "interaction" }, "waiting", 0, "info");
+    await waitFor(() => notifications(socket.lines).length === 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({ title: "Pi needs your input" });
+    expect(socket.lines.some((line) => line.includes('"title":"Subagents need attention"'))).toBe(false);
+
+    // The following failure proves the interaction's baseline was retained:
+    // it has one fresh failed delta and starts its own terminal burst.
+    update(1, 4, { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, "error", 1, "error");
+    await waitFor(() => socket.lines.some((line) => line.includes('"title":"Subagents need attention"')));
+
+    // A generation replacement through the same interaction path must also
+    // invalidate a pending burst, then establish the next baseline.
+    update(1, 5, { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, "error", 2, "error");
+    update(2, 1, { id: "pi-subagent", label: "PRIVATE INPUT", kind: "interaction" }, "waiting", 0, "info");
+    await waitFor(() => notifications(socket.lines).length === 3);
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    expect(socket.lines.filter((line) => line.includes('"title":"Subagents need attention"'))).toHaveLength(1);
+    update(2, 2, { id: "pi-subagent", label: "Subagents", kind: "agent-group" }, "error", 1, "error");
+    await waitFor(() => socket.lines.filter((line) => line.includes('"title":"Subagents need attention"')).length === 2);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("generic attention dedupes repeated updates but admits new terminal and input lifecycles", async () => {
+  const socket = await fixture();
+  try {
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, { ...resolvePresenceConfig(), log: true });
+    const sessionId = "generic-attention-dedupe-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    const update = (
+      sequence: number,
+      state: PresenceUpdate["state"],
+      failed: number,
+      attention: PresenceUpdate["attention"],
+      kind = "task",
+    ) => runtime.handlePresenceUpdate({
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: "dedupe-source", label: `Changing label ${sequence}`, kind },
+      state, counts: { active: state === "running" ? 1 : 0, completed: 0, failed }, attention,
+    });
+
+    update(1, "error", 1, "error");
+    update(2, "error", 1, "error");
+    update(3, "error", 1, "error");
+    await waitFor(() => notifications(socket.lines).length === 1);
+
+    update(4, "error", 2, "error");
+    await waitFor(() => notifications(socket.lines).length === 2);
+    update(5, "running", 2, "none");
+    update(6, "waiting", 2, "info", "interaction");
+    update(7, "waiting", 2, "info", "interaction");
+    await waitFor(() => notifications(socket.lines).length === 3);
+    update(8, "running", 2, "none");
+    update(9, "waiting", 2, "info", "interaction");
+    await waitFor(() => notifications(socket.lines).length === 4);
+    await runtime.shutdownSession();
+    // V1 log writes may be latest-write-wins in the socket queue, but repeated
+    // updates never create more than one log request per semantic lifecycle.
+    expect(socket.lines.filter((line) => line.startsWith("log --level=")).length).toBeGreaterThanOrEqual(3);
+    expect(socket.lines.filter((line) => line.startsWith("log --level=")).length).toBeLessThanOrEqual(4);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length).toBeGreaterThanOrEqual(3);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length).toBeLessThanOrEqual(4);
+  } finally {
+    await socket.cleanup();
+  }
+});
+
 test("interaction info follows notification and flash policies with independent capabilities", async () => {
   const observe = async (
     notificationPolicy: "errors" | "background" | "settled" | "all" | "disabled",
