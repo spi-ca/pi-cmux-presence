@@ -179,12 +179,37 @@ async function presenceFixture(
   const surfaceId = "00000000-0000-4000-8000-000000000002";
   const lines: string[] = [];
   const requests: Array<{ line: string; at: number }> = [];
+  const requestWaiters = new Set<{
+    predicate: (line: string) => boolean;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  const nextRequest = (predicate: (line: string) => boolean, timeoutMs = 1_000): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          requestWaiters.delete(waiter);
+          reject(new Error("Timed out waiting for fake socket request."));
+        }, timeoutMs),
+      };
+      requestWaiters.add(waiter);
+    });
   const directory = await fs.mkdtemp(join(os.tmpdir(), "presence-lifecycle-"));
   const socketPath = join(directory, "cmux.sock");
   let capabilityRequests = 0;
   const server = await fakeSocket(socketPath, async (line) => {
     lines.push(line);
     requests.push({ line, at: performance.now() });
+    for (const waiter of requestWaiters) {
+      if (!waiter.predicate(line)) continue;
+      requestWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
     await requestGate?.(line);
     if (line.startsWith("{")) {
       const request = JSON.parse(line) as { id: number; method: string; params: Record<string, unknown> };
@@ -214,9 +239,18 @@ async function presenceFixture(
     PI_CMUX_PRESENCE_FINAL_CLEAR_MS: "60000",
   });
   return {
-    workspaceId, surfaceId, lines, requests,
+    workspaceId, surfaceId, lines, requests, nextRequest,
     activeConnections: server.activeConnections,
-    cleanup: async () => { restoreEnv(); await server.close(); await fs.rm(directory, { recursive: true, force: true }); },
+    cleanup: async () => {
+      restoreEnv();
+      for (const waiter of requestWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("Fake socket fixture closed before the expected request."));
+      }
+      requestWaiters.clear();
+      await server.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    },
   };
 }
 
@@ -542,13 +576,14 @@ test("removal clears only retained external status, reselects progress, recomput
       counts: { active: 1, completed: 0, failed: attention === "error" ? 1 : 0 },
       progress: { value: progress, label }, attention,
     });
-    update("remove-first", "First", 1, 0.25, "error");
-    update("remove-second", "Second", 1, 0.75, "none");
     const firstKey = presenceStatusKey("remove-first", fixture.surfaceId);
     const secondKey = presenceStatusKey("remove-second", fixture.surfaceId);
-    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${firstKey} `))
-      && fixture.lines.some((line) => line.startsWith(`set_status ${secondKey} `))
-      && fixture.lines.some((line) => line.startsWith("set_progress ")));
+    const firstStatus = fixture.nextRequest((line) => line.startsWith(`set_status ${firstKey} `));
+    const secondStatus = fixture.nextRequest((line) => line.startsWith(`set_status ${secondKey} `));
+    const initialProgress = fixture.nextRequest((line) => line.startsWith("set_progress "));
+    update("remove-first", "First", 1, 0.25, "error");
+    update("remove-second", "Second", 1, 0.75, "none");
+    await Promise.all([firstStatus, secondStatus, initialProgress]);
     const beforeRemoval = {
       logs: fixture.lines.filter((line) => line.startsWith("log --level=")).length,
       notifications: fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"')).length,
@@ -557,12 +592,15 @@ test("removal clears only retained external status, reselects progress, recomput
       metadata: fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length,
     };
 
+    const firstClear = fixture.nextRequest((line) => line.startsWith(`clear_status ${firstKey} `));
+    const reselectedProgress = fixture.nextRequest((line) => line.startsWith("set_progress ") && line.includes('"Second"'));
+    const firstRemovalMetaRequest = fixture.nextRequest((line) => line.startsWith("report_meta_block ")
+      && line.endsWith(" -- 1\\n0\\n0\\n0\\n0\\n0\\n0\\n0.00\\n0"));
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "remove-first" } });
-    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`clear_status ${firstKey} `)).length === 1
-      && fixture.lines.filter((line) => line.startsWith("set_progress ")).some((line) => line.includes('"Second"'))
-      && fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length > beforeRemoval.metadata);
+    await Promise.all([firstClear, reselectedProgress, firstRemovalMetaRequest]);
     const firstRemovalMeta = fixture.lines.filter((line) => line.startsWith("report_meta_block ")).at(-1)!;
     expect(firstRemovalMeta.slice(firstRemovalMeta.indexOf(" -- ") + 4)).toBe("1\\n0\\n0\\n0\\n0\\n0\\n0\\n0.00\\n0");
+    expect(fixture.lines.filter((line) => line.startsWith("report_meta_block ")).length).toBeGreaterThan(beforeRemoval.metadata);
     expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `))).toHaveLength(0);
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(fixture.lines.filter((line) => line.startsWith("log --level="))).toHaveLength(beforeRemoval.logs);
@@ -570,10 +608,10 @@ test("removal clears only retained external status, reselects progress, recomput
     expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(beforeRemoval.flashes);
     expect(fixture.lines.filter((line) => line.includes('"method":"feed.push"'))).toHaveLength(beforeRemoval.feeds);
 
-    const progressClearsBeforeSecond = fixture.lines.filter((line) => line.startsWith("clear_progress ")).length;
+    const secondClear = fixture.nextRequest((line) => line.startsWith(`clear_status ${secondKey} `));
+    const progressClear = fixture.nextRequest((line) => line.startsWith("clear_progress "));
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: "remove-second" } });
-    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `)).length === 1
-      && fixture.lines.filter((line) => line.startsWith("clear_progress ")).length > progressClearsBeforeSecond);
+    await Promise.all([secondClear, progressClear]);
     const statusClearsAfterSecond = fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `)).length;
     pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 3, source: { id: "remove-second" } });
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -1607,11 +1645,15 @@ test("an invalid replacement session clears the previous session outputs", async
 });
 
 test("detached cleanup sends every retained status clear beyond one close timeout", async () => {
-  const responseDelayMs = 6;
+  const requestTimeoutMs = 500;
+  const responseDelayMs = 15;
   const fixture = await presenceFixture(undefined, async () => {
     await new Promise<void>((resolve) => setTimeout(resolve, responseDelayMs));
   });
   try {
+    // Forty serial clears exceed one request timeout (600ms > 500ms), while
+    // the derived aggregate cleanup budget is 2s and leaves load headroom.
+    process.env.PI_CMUX_PRESENCE_TIMEOUT_MS = String(requestTimeoutMs);
     const pi = fakePi();
     extension(pi.api as never);
     const sessionId = "cleanup-tail-session";
@@ -1638,7 +1680,7 @@ test("detached cleanup sends every retained status clear beyond one close timeou
       const key = presenceStatusKey(`retained-${index}`, fixture.surfaceId);
       expect(clears.some((request) => request.line.startsWith(`clear_status ${key} `))).toBe(true);
     }
-    expect(clears.at(-1)!.at - clears[0]!.at).toBeGreaterThan(100);
+    expect(clears.at(-1)!.at - clears[0]!.at).toBeGreaterThan(requestTimeoutMs);
   } finally {
     await fixture.cleanup();
   }
