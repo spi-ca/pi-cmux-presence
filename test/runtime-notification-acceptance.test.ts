@@ -380,6 +380,48 @@ test("generic attention dedupes repeated updates but admits new terminal and inp
   }
 });
 
+test("external generation and none churn is bounded and coalesced before cmux attention output", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, {
+      ...resolvePresenceConfig(), log: true, notificationPolicy: "all", flashPolicy: "attention",
+    }, clock);
+    const sessionId = "external-attention-rate-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    for (let generation = 1; generation <= 6; generation += 1) {
+      runtime.handlePresenceUpdate({
+        version: 1, sessionId, generation, sequence: 1,
+        source: { id: "untrusted-churn", label: "Untrusted churn", kind: "task" },
+        state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+      });
+      runtime.handlePresenceUpdate({
+        version: 1, sessionId, generation, sequence: 2,
+        source: { id: "untrusted-churn", label: "Untrusted churn", kind: "task" },
+        state: "running", counts: { active: 1, completed: 0, failed: 1 }, attention: "none",
+      });
+    }
+
+    await waitFor(() => notifications(socket.lines).length === 4, 500);
+    expect(socket.lines.filter((line) => line.startsWith("log --level=error"))).toHaveLength(4);
+    // Socket queue coalescing may collapse simultaneous flash requests, but
+    // it cannot create more flash output than the rate bucket admitted.
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length).toBeLessThanOrEqual(4);
+    clock.advance(999);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(4);
+
+    clock.advance(1);
+    await waitFor(() => notifications(socket.lines).length === 5, 500);
+    expect(socket.lines.filter((line) => line.startsWith("log --level=error"))).toHaveLength(5);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length).toBeLessThanOrEqual(5);
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
 test("interaction info follows notification and flash policies with independent capabilities", async () => {
   const observe = async (
     notificationPolicy: "errors" | "background" | "settled" | "all" | "disabled",

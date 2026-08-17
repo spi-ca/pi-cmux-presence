@@ -130,6 +130,7 @@ describe("generic presence event state", () => {
     expect(parsePresenceReady({ version: 1, sessionId, source: "no" })).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId: "bad\u202e" })).toBeNull();
     const sparseCapabilities = new Array<string>(1);
+    const proxiedCapabilities = new Proxy(["cmux-status"], {});
     const accessorCapabilities = ["cmux-status"];
     Object.defineProperty(accessorCapabilities, "0", { enumerable: true, get() { throw new Error("nope"); } });
     const inheritedRoot = Object.create({ version: 1, sessionId });
@@ -137,6 +138,7 @@ describe("generic presence event state", () => {
     const rootAccessor = { version: 1, sessionId };
     Object.defineProperty(rootAccessor, "consumer", { enumerable: true, get() { throw new Error("nope"); } });
     expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: sparseCapabilities } })).toBeNull();
+    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: proxiedCapabilities } })).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: accessorCapabilities } })).toBeNull();
     expect(parsePresenceReady(inheritedRoot)).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId, consumer: inheritedConsumer })).toBeNull();

@@ -115,6 +115,22 @@ type GenericAttentionSemantic = {
   readonly interactionWaiting: boolean;
 };
 
+type ExternalAttention = {
+  readonly key: string;
+  readonly priority: number;
+  readonly level: "info" | AttentionKind;
+  readonly title: string;
+  readonly body: string;
+  readonly notify: boolean;
+  readonly flash: boolean;
+};
+
+// A bounded session-wide bucket prevents untrusted event-bus producers from
+// converting generation/none churn into an unbounded cmux attention stream.
+const EXTERNAL_ATTENTION_BURST = 4;
+const EXTERNAL_ATTENTION_INTERVAL_MS = 1_000;
+const MAX_PENDING_EXTERNAL_ATTENTION = 64;
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -167,6 +183,12 @@ export class PresenceRuntime {
   private subagentPending: PendingSubagentAttention | null = null;
   /** At most one semantic attention marker per retained external source. */
   private readonly genericAttentionBySource = new Map<string, GenericAttentionSemantic>();
+  /** Becomes true only after the current client completed owned initialization. */
+  private attentionOutputReady = false;
+  private externalAttentionTokens = EXTERNAL_ATTENTION_BURST;
+  private externalAttentionRefillAt = 0;
+  private readonly pendingExternalAttention = new Map<string, ExternalAttention>();
+  private externalAttentionTimer: ReturnType<typeof setTimeout> | undefined;
   private subagentTimer: ReturnType<typeof setTimeout> | undefined;
   private subagentTimerEpoch = 0;
   private parentRunRevision = 0;
@@ -219,6 +241,7 @@ export class PresenceRuntime {
         this.invalidateSubagentNotifications();
       }
       this.genericAttentionBySource.delete(event.source.id);
+      this.discardPendingExternalAttention(event.source.id);
       if (result.removed) {
         this.clearRemovedStatus(this.statusKey(event.source.id));
       }
@@ -297,6 +320,9 @@ export class PresenceRuntime {
       // This runs only after the client is the current runtime owner.
       await created.initializeOwnedProgress();
       if (!this.isCurrent(epoch, nextSessionId)) return;
+      // Earlier event-bus input may be retained, but it cannot consume
+      // semantic attention dedupe until this owned client is usable.
+      this.attentionOutputReady = true;
     }
 
     await this.initializeOptionalIntegrations(nextSessionId);
@@ -476,6 +502,7 @@ export class PresenceRuntime {
     this.hadToolError = false;
     this.shownProgress = false;
     this.resetSubagentNotifications();
+    this.resetExternalAttention();
     this.genericAttentionBySource.clear();
     this.parentRunRevision = 0;
     this.fencedParentRun = null;
@@ -513,6 +540,7 @@ export class PresenceRuntime {
     this.hadToolError = false;
     this.shownProgress = false;
     this.resetSubagentNotifications();
+    this.resetExternalAttention();
     this.genericAttentionBySource.clear();
     this.parentRunRevision = 0;
     this.fencedParentRun = null;
@@ -662,30 +690,39 @@ export class PresenceRuntime {
       const level = attentionLevel(event.attention);
       const suppressParentAttention = event.source.id === LOCAL_SOURCE.id && this.suppressParentAttentionOnce;
       if (suppressParentAttention) this.suppressParentAttentionOnce = false;
-      // Official hooks already own local completion attention. Generic producer
-      // attention is semantic-deduped per source before any cmux side effect.
-      if (level && this.shouldDispatchGenericAttention(event, level, interactionPresentation !== null)
+      // Official hooks already own local completion attention. Do not consume
+      // external semantic dedupe until this session owns a usable cmux client.
+      const external = event.source.id !== LOCAL_SOURCE.id;
+      if (level && (!external || this.attentionOutputReady)
+        && this.shouldDispatchGenericAttention(event, level, interactionPresentation !== null)
         && !suppressParentAttention && !(this.officialHook && event.source.id === LOCAL_SOURCE.id)) {
-        void this.client?.log(level, label);
-        if (!this.config.suppressNativeNotifications && shouldNotifyAttention(
+        const notify = !this.config.suppressNativeNotifications && shouldNotifyAttention(
           this.config.notificationPolicy,
           this.config.notifications,
           event.attention,
-          event.source.id === LOCAL_SOURCE.id ? "local" : "external",
-        )) {
-          void this.client?.notify(
-            presentation?.title ?? formatAttentionTitle(event, this.config.maxLabelChars),
-            presentation?.body ?? label,
-          );
-        }
-        if (!this.config.suppressNativeFlash && shouldFlashAttention(
+          external ? "external" : "local",
+        );
+        const flash = !this.config.suppressNativeFlash && shouldFlashAttention(
           this.config.flashPolicy,
           this.config.flash,
           this.config.notificationPolicy,
           event.attention,
-          event.source.id === LOCAL_SOURCE.id ? "local" : "external",
-        )) {
-          void this.client?.flash();
+          external ? "external" : "local",
+        );
+        const title = presentation?.title ?? formatAttentionTitle(event, this.config.maxLabelChars);
+        const body = presentation?.body ?? label;
+        if (external) {
+          this.enqueueExternalAttention(
+            event.source.id,
+            interactionPresentation !== null ? "input" : level === "error" ? "error" : "other",
+            level,
+            title,
+            body,
+            notify,
+            flash,
+          );
+        } else {
+          this.emitAttention(level, title, body, notify, flash);
         }
       } else if (!level) {
         this.genericAttentionBySource.delete(event.source.id);
@@ -891,28 +928,33 @@ export class PresenceRuntime {
       this.config.maxLabelChars,
     );
     const attention: PresenceUpdate["attention"] = content.attention;
-    void this.client?.log(attention, content.body);
     // An official Pi hook suppresses only successful pi-subagent native alerts.
-    if (!this.config.suppressNativeNotifications
-      && !(this.officialHook && attention === "success") && shouldNotifyAttention(
+    const suppressedSuccess = this.officialHook && attention === "success";
+    const notify = !this.config.suppressNativeNotifications && !suppressedSuccess && shouldNotifyAttention(
       this.config.notificationPolicy,
       this.config.notifications,
       attention,
       "external",
       options.parentSucceeded === true,
-    )) {
-      void this.client?.notify(content.title, content.body);
-    }
-    if (!this.config.suppressNativeFlash
-      && !(this.officialHook && attention === "success") && shouldFlashAttention(
+    );
+    const flash = !this.config.suppressNativeFlash && !suppressedSuccess && shouldFlashAttention(
       this.config.flashPolicy,
       this.config.flash,
       this.config.notificationPolicy,
       attention,
       "external",
       options.parentSucceeded === true,
-    )) {
-      void this.client?.flash();
+    );
+    if (this.attentionOutputReady) {
+      this.enqueueExternalAttention(
+        PI_SUBAGENT_SOURCE_ID,
+        attention === "error" ? "error" : "other",
+        attention,
+        content.title,
+        content.body,
+        notify,
+        flash,
+      );
     }
   }
 
@@ -1003,6 +1045,109 @@ export class PresenceRuntime {
     this.subagentPending = null;
     this.subagentBaseline = null;
     this.suppressedParentAttention = null;
+  }
+
+  private resetExternalAttention(): void {
+    if (this.externalAttentionTimer) this.clock.clearTimeout(this.externalAttentionTimer);
+    this.externalAttentionTimer = undefined;
+    this.pendingExternalAttention.clear();
+    this.externalAttentionTokens = EXTERNAL_ATTENTION_BURST;
+    this.externalAttentionRefillAt = this.clock.now();
+    this.attentionOutputReady = false;
+  }
+
+  private emitAttention(
+    level: "info" | AttentionKind,
+    title: string,
+    body: string,
+    notify: boolean,
+    flash: boolean,
+  ): void {
+    void this.client?.log(level, body);
+    if (notify) void this.client?.notify(title, body);
+    if (flash) void this.client?.flash();
+  }
+
+  private enqueueExternalAttention(
+    sourceId: string,
+    category: "input" | "error" | "other",
+    level: "info" | AttentionKind,
+    title: string,
+    body: string,
+    notify: boolean,
+    flash: boolean,
+  ): void {
+    if (!this.attentionOutputReady || (!this.config.log && !notify && !flash)) return;
+    this.refillExternalAttentionTokens();
+    const priority = category === "error" ? 3 : category === "input" ? 2 : 1;
+    const key = `${sourceId}\u0000${category}`;
+    const next = { key, priority, level, title, body, notify, flash };
+    if (this.externalAttentionTokens > 0) {
+      this.externalAttentionTokens -= 1;
+      this.emitAttention(level, title, body, notify, flash);
+      return;
+    }
+
+    if (!this.pendingExternalAttention.has(key)
+      && this.pendingExternalAttention.size >= MAX_PENDING_EXTERNAL_ATTENTION) {
+      let lowest: ExternalAttention | null = null;
+      for (const candidate of this.pendingExternalAttention.values()) {
+        if (!lowest || candidate.priority < lowest.priority) lowest = candidate;
+      }
+      if (!lowest || lowest.priority >= priority) return;
+      this.pendingExternalAttention.delete(lowest.key);
+    }
+    this.pendingExternalAttention.set(key, next);
+    this.scheduleExternalAttentionFlush();
+  }
+
+  private discardPendingExternalAttention(sourceId: string): void {
+    const prefix = `${sourceId}\u0000`;
+    for (const key of this.pendingExternalAttention.keys()) {
+      if (key.startsWith(prefix)) this.pendingExternalAttention.delete(key);
+    }
+  }
+
+  private refillExternalAttentionTokens(): void {
+    const now = this.clock.now();
+    const elapsed = now - this.externalAttentionRefillAt;
+    if (elapsed < EXTERNAL_ATTENTION_INTERVAL_MS) return;
+    const replenished = Math.floor(elapsed / EXTERNAL_ATTENTION_INTERVAL_MS);
+    this.externalAttentionTokens = Math.min(EXTERNAL_ATTENTION_BURST, this.externalAttentionTokens + replenished);
+    this.externalAttentionRefillAt += replenished * EXTERNAL_ATTENTION_INTERVAL_MS;
+  }
+
+  private scheduleExternalAttentionFlush(): void {
+    if (this.externalAttentionTimer || this.pendingExternalAttention.size === 0) return;
+    const delay = Math.max(0, EXTERNAL_ATTENTION_INTERVAL_MS - (this.clock.now() - this.externalAttentionRefillAt));
+    const epoch = this.sessionEpoch;
+    this.externalAttentionTimer = this.clock.setTimeout(() => {
+      this.externalAttentionTimer = undefined;
+      if (epoch !== this.sessionEpoch || !this.attentionOutputReady) return;
+      this.flushExternalAttention();
+    }, delay);
+    this.externalAttentionTimer.unref?.();
+  }
+
+  private flushExternalAttention(): void {
+    this.refillExternalAttentionTokens();
+    while (this.externalAttentionTokens > 0 && this.pendingExternalAttention.size > 0) {
+      const next = this.selectPendingExternalAttention(true);
+      if (!next) break;
+      this.externalAttentionTokens -= 1;
+      this.emitAttention(next.level, next.title, next.body, next.notify, next.flash);
+    }
+    this.scheduleExternalAttentionFlush();
+  }
+
+  /** Select highest priority, retaining insertion order for equally urgent entries. */
+  private selectPendingExternalAttention(remove: boolean): ExternalAttention | null {
+    let selected: ExternalAttention | null = null;
+    for (const candidate of this.pendingExternalAttention.values()) {
+      if (!selected || candidate.priority > selected.priority) selected = candidate;
+    }
+    if (selected && remove) this.pendingExternalAttention.delete(selected.key);
+    return selected;
   }
 
   /** Decide whether this event starts a new bounded generic attention lifecycle. */

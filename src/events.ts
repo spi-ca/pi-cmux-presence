@@ -77,7 +77,8 @@ function snapshotOwnDataFields(
 
 /** Copy a dense, bounded capability list without reading indexed accessors. */
 function snapshotCapabilities(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
+  // Array.isArray(proxy) is true, so reject before any reflective operation.
+  if (isProxy(value) || !Array.isArray(value)) return null;
   const keys = Reflect.ownKeys(value);
   const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
   if (!lengthDescriptor || !("value" in lengthDescriptor)

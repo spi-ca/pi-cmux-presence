@@ -277,6 +277,37 @@ async function presenceFixture(
   };
 }
 
+test("generic attention received during initialization remains deliverable after the client is ready", async () => {
+  const sessionId = "initialization-attention-session";
+  let pi: ReturnType<typeof fakePi>;
+  const fixture = await presenceFixture(async () => {
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: "initialization-source", label: "Initialization source", kind: "task" },
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    });
+  });
+  try {
+    pi = fakePi();
+    extension(pi.api as never);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+
+    // This is the first point at which the same semantic lifecycle has a
+    // negotiated cmux output path; it must not be deduped by the pre-ready event.
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 2,
+      source: { id: "initialization-source", label: "Initialization source", kind: "task" },
+      state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"')));
+    expect(fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"'))).toHaveLength(1);
+    await pi.lifecycle("session_shutdown");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("lifecycle observes Pi and generic producers through only the targeted fake socket", async () => {
   const fixture = await presenceFixture();
   try {
