@@ -47,7 +47,7 @@ const TODO_SOURCE = "pi-todo";
 type ContextProvider = { getContextUsage?: () => unknown };
 type TerminalState = "success" | "error" | "cancelled";
 type ToolFeedEvent = { toolCallId?: unknown; toolName?: unknown };
-type OfficialHookDetector = () => Promise<boolean>;
+type OfficialHookDetector = (signal: AbortSignal) => Promise<boolean>;
 type SocketPathResolver = () => Promise<string | null>;
 
 type RuntimeClock = {
@@ -128,6 +128,10 @@ export class PresenceRuntime {
   private clientCloseBarrier: Promise<void> = Promise.resolve();
   /** One intrinsic fingerprint lease may remain unresolved across client replacement. */
   private readonly fingerprintGate = new UnresolvedSocketFingerprintGate();
+  /** Cancels only the current epoch's wait for official-hook authority. */
+  private officialHookProbeAbort: AbortController | null = null;
+  /** An unabortable hook probe remains exclusive until it actually settles. */
+  private unresolvedOfficialHookProbe: Promise<void> | null = null;
   /** Cancels only the current epoch's wait for pre-ownership path resolution. */
   private socketResolutionAbort: AbortController | null = null;
   /** An unabortable filesystem resolver remains exclusive until it actually settles. */
@@ -169,7 +173,7 @@ export class PresenceRuntime {
     private readonly pi: ExtensionAPI,
     private readonly config: PresenceConfig,
     private readonly clock: RuntimeClock = SYSTEM_RUNTIME_CLOCK,
-    private readonly detectOfficialHook: OfficialHookDetector = officialHookDetected,
+    private readonly detectOfficialHook: OfficialHookDetector = (signal) => officialHookDetected(process.env, signal),
     private readonly resolveSocketPath: SocketPathResolver = resolveCmuxSocketPath,
   ) {}
 
@@ -237,6 +241,7 @@ export class PresenceRuntime {
 
   async startSession(context: unknown): Promise<void> {
     const epoch = ++this.sessionEpoch;
+    this.officialHookProbeAbort?.abort();
     this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
@@ -248,7 +253,7 @@ export class PresenceRuntime {
     if (epoch !== this.sessionEpoch || nextSessionId === null) return;
 
     this.beginSession(nextSessionId, context);
-    const detectedOfficialHook = await this.detectOfficialHook();
+    const detectedOfficialHook = await this.detectOfficialHookWithinDeadline();
     if (!this.isCurrent(epoch, nextSessionId)) return;
     this.officialHook = detectedOfficialHook;
 
@@ -408,6 +413,7 @@ export class PresenceRuntime {
 
   async shutdownSession(): Promise<void> {
     ++this.sessionEpoch;
+    this.officialHookProbeAbort?.abort();
     this.socketResolutionAbort?.abort();
     this.cancelFinalClear();
 
@@ -503,6 +509,46 @@ export class PresenceRuntime {
 
   private isCurrent(epoch: number, sessionId: string): boolean {
     return epoch === this.sessionEpoch && sessionId === this.sessionId;
+  }
+
+  /**
+   * Bound pre-socket official-hook authority. An unabortable detector remains
+   * exclusive until settlement; timeout, abort, and detector errors fail closed.
+   */
+  private async detectOfficialHookWithinDeadline(): Promise<boolean> {
+    if (this.unresolvedOfficialHookProbe) return true;
+
+    const controller = new AbortController();
+    this.officialHookProbeAbort = controller;
+    let probe: Promise<boolean>;
+    try {
+      probe = Promise.resolve(this.detectOfficialHook(controller.signal));
+    } catch {
+      if (this.officialHookProbeAbort === controller) this.officialHookProbeAbort = null;
+      return true;
+    }
+    let settled!: Promise<void>;
+    settled = probe.then(() => {}, () => {}).finally(() => {
+      if (this.unresolvedOfficialHookProbe === settled) this.unresolvedOfficialHookProbe = null;
+    });
+    this.unresolvedOfficialHookProbe = settled;
+
+    let removeAbort = () => {};
+    const uncertain = new Promise<boolean>((resolve) => {
+      const abort = () => resolve(true);
+      controller.signal.addEventListener("abort", abort, { once: true });
+      removeAbort = () => controller.signal.removeEventListener("abort", abort);
+    });
+    const timer = this.clock.setTimeout(() => controller.abort(), this.config.timeoutMs);
+    timer.unref?.();
+
+    try {
+      return await Promise.race([probe.then((detected) => detected, () => true), uncertain]);
+    } finally {
+      this.clock.clearTimeout(timer);
+      removeAbort();
+      if (this.officialHookProbeAbort === controller) this.officialHookProbeAbort = null;
+    }
   }
 
   /**

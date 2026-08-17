@@ -28,7 +28,7 @@ src/events.ts             — update/remove/ready contract, 공유 source fence�
 src/hooks.ts              — Pi lifecycle과 process-local event observer 등록
 src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로 검증
 src/notification-policy.ts — exact `pi-subagent` 누적 terminal·attention/flash policy 판정
-src/official-hook.ts      — home-relative agent directory와 공식 cmux hook 감지
+src/official-hook.ts      — home-relative agent directory의 bounded regular-file read와 공식 cmux hook authority 감지
 src/presence.ts           — 설정을 해석하고 runtime과 hook adapter를 조합하는 얇은 composition root
 src/presentation.ts       — status/progress 선택, style, label·meta·terminal 상태의 순수 렌더링 정책
 src/protocol.ts           — 목적지별 byte 한도와 cmux V1/V2 request·response 검증·인코딩
@@ -44,7 +44,8 @@ test/entrypoint.test.ts   — 공개 확장 진입점의 lifecycle/event 등록,
 test/notification-policy.test.ts — exact `pi-subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — manual clock과 fake Unix socket으로 활성 부모의 고정 window·후속 burst settlement 집계, 독립 error, 10초 fence, stale official-hook probe 및 callback fence를 결정적으로 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
-test/runtime-resolution.test.ts — startup resolver와 runtime 공유 fingerprint lease gate의 replacement fence 테스트
+test/official-hook.test.ts — marker/부재/override와 non-regular·64 KiB 초과 source의 bounded probe 테스트
+test/runtime-resolution.test.ts — startup resolver, 공식 hook probe deadline·epoch fence, runtime 공유 fingerprint lease gate의 replacement fence 테스트
 test/socket-only.test.ts  — production 소스에 process 실행 API가 없음을 확인하는 정적 가드 테스트
 test/state.test.ts        — event registry 파싱, source fence, todo adapter, identity, usage 상태 테스트
 test/text.test.ts         — canonical local turn presentation, text 정규화·축약과 byte-bound 테스트
@@ -79,7 +80,7 @@ bun run diagram:render
 - `pi`와 `pi-todo`는 예약 source입니다. generic update/remove/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다. startup은 frozen advertisement 뒤 frozen consumer-less request 하나를 내며, ready에서 `consumer` 생략은 matching active consumer의 advertisement 하나와 local/todo replay 한 번을 요청합니다. consumer-bearing advertisement는 response나 replay를 유발하지 않아야 하며 nested request도 증폭해서는 안 됩니다. 이 load-order 보정은 socket·process·lifecycle authority를 만들지 않습니다. update/remove는 같은 source fence를 공유하고 remove 뒤 tombstone을 유지해야 합니다. `pi-subagent`는 예약은 아니지만 exact source ID의 attention과 remove invalidation에만 cumulative terminal policy가 적용되므로 label/kind 기반 special case를 추가하지 않습니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
-- 공식 cmux hook이 감지되면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
+- 공식 cmux hook probe는 소켓 경로 해석 전에 `timeoutMs` deadline 및 session epoch abort로 제한합니다. probe timeout·abort·오류와 non-regular 또는 64 KiB 초과 source는 authority가 불확실하므로 공식 hook이 있다고 fail-close하며, 실제로 미해결인 underlying probe는 runtime당 하나만 허용하고 늦은 결과를 새 epoch에 적용하지 않습니다. marker가 없는 정상 regular source와 확인된 부재, 정확한 `CMUX_PI_HOOKS_DISABLED=1`만 hook 부재로 처리합니다. 공식 hook이 감지되거나 authority가 불확실하면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
 - 검토한 child profile은 정확한 `PI_CMUX_PROFILE=subagent-child-v1`와 channel별 exact disable만 해석합니다. partial·malformed `PI_CMUX_*` 값이나 `PI_CMUX_SIDEBAR_SOURCE`로 다른 suppression을 추론하지 않고, sidebar/status·progress·log를 끄지 않습니다.
 - local Pi 및 exact `pi-subagent` cancellation은 status-only `attention: "none"`입니다. `all`/`attention` policy에서도 notification·flash·attention log로 승격하지 않습니다.
 - local Pi sidebar/notification은 canonical fixed summary만 사용합니다. assistant response body·preview, prompt, raw error, path, tool argument/output을 새 전송 text로 추가하지 않으며 terminal sidebar는 `finalClearMs` 뒤 clear합니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
@@ -87,7 +88,7 @@ bun run diagram:render
 
 ## 검증 범위
 
-`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값, `settled` trim/case 포함), V1/V2 codec과 multibyte 경계, capability gate, update/remove/ready contract와 shared-fence tombstone, remove의 exact status clear·progress/meta 재계산·attention silence, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, `settled` policy matrix, canonical local presentation의 static/no-payload byte bound, 전체 todo ID 고유성, status state, invalid session fail-closed, 연결 전 error/timeout 및 post-write 응답 timeout 뒤 queue 복구, 실제 미해결 post-connect fingerprint의 timeout/abort·unsolicited data/close fail-close, runtime replacement 간 공유 fingerprint lease 상한·late-release fence, startup 경로 검증의 timeout·epoch fence 및 반복 deadline resolver 상한, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
+`bun run ci`는 설정 파싱(검토한 exact child profile 및 partial/malformed 값, `settled` trim/case 포함), V1/V2 codec과 multibyte 경계, capability gate, update/remove/ready contract와 shared-fence tombstone, remove의 exact status clear·progress/meta 재계산·attention silence, exact `pi-subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, `settled` policy matrix, canonical local presentation의 static/no-payload byte bound, 전체 todo ID 고유성, status state, invalid session fail-closed, 공식 hook의 marker/부재/override와 bounded regular-file read, probe timeout·epoch fence·미해결 probe 상한, 연결 전 error/timeout 및 post-write 응답 timeout 뒤 queue 복구, 실제 미해결 post-connect fingerprint의 timeout/abort·unsolicited data/close fail-close, runtime replacement 간 공유 fingerprint lease 상한·late-release fence, startup 경로 검증의 timeout·epoch fence 및 반복 deadline resolver 상한, lifecycle 전이·teardown race, keyed queue 병합을 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 active-parent 고정 window·후속 burst settlement 집계, 독립 error, 10초 parent-run fence, stale official-hook probe, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence, notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
 
 이 검증은 consumer 쪽 generic producer shape, 검토한 exact child-profile suppression, fake Unix socket과 정적 status-key namespace까지만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 연동은 검증하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
 
