@@ -96,6 +96,7 @@ export async function officialHookDetected(
   throwIfAborted(signal);
   const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
   const handle = await fs.open(hookPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | noFollow);
+  let detected = false;
   try {
     throwIfAborted(signal);
     const openedEntry = await handle.stat();
@@ -106,14 +107,11 @@ export async function officialHookDetected(
     }
     const source = await readBoundedOfficialHookSource(handle, signal);
     throwIfAborted(signal);
-    return source.includes(OFFICIAL_HOOK_MARKER);
+    detected = source.includes(OFFICIAL_HOOK_MARKER);
   } finally {
     // Always close the descriptor, including after cancellation.
-    const abortedBeforeClose = signal?.aborted;
-    const abortReason = signal?.reason;
     await handle.close();
-    if (abortedBeforeClose || signal?.aborted) {
-      throw abortReason ?? signal?.reason ?? new Error("Official hook probe aborted.");
-    }
   }
+  throwIfAborted(signal);
+  return detected;
 }
