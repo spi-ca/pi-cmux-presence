@@ -172,6 +172,7 @@ async function presenceFixture(
   firstCapabilityGate?: () => Promise<void>,
   requestGate?: (line: string) => Promise<void>,
   advertisedMethods = ["notification.create_for_surface"],
+  v1Response?: (line: string) => string | Promise<string>,
 ) {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const surfaceId = "00000000-0000-4000-8000-000000000002";
@@ -195,7 +196,7 @@ async function presenceFixture(
         : {};
       return JSON.stringify({ id: request.id, ok: true, result });
     }
-    return "OK";
+    return await v1Response?.(line) ?? "OK";
   });
   const restoreEnv = replaceEnv({
     CMUX_WORKSPACE_ID: workspaceId,
@@ -576,6 +577,264 @@ test("removal clears only retained external status, reselects progress, recomput
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${secondKey} `))).toHaveLength(statusClearsAfterSecond);
     await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("failed accepted removal clear is retried once at teardown without new presentation or attention", async () => {
+  let removalKey = "";
+  let firstClearResponded = false;
+  let failFirstClear = true;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    ["notification.create_for_surface", "surface.trigger_flash"],
+    (line) => {
+      if (failFirstClear && removalKey && line.startsWith(`clear_status ${removalKey} `)) {
+        failFirstClear = false;
+        firstClearResponded = true;
+        return "NOT OK";
+      }
+      return "OK";
+    },
+  );
+  try {
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_FLASH_POLICY = "attention";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-retry-session";
+    const sourceId = "remove-clear-retry";
+    removalKey = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Retry source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${removalKey} `)));
+    const updatesBeforeRemove = pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT).length;
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => firstClearResponded);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${removalKey} `))).toHaveLength(1);
+    expect(pi.emitted.filter((event) => event.name === PI_PRESENCE_UPDATE_EVENT)).toHaveLength(updatesBeforeRemove);
+    expect(fixture.lines.filter((line) => line.startsWith(`set_status ${removalKey} `))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+
+    await pi.lifecycle("session_shutdown");
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${removalKey} `))).toHaveLength(2);
+    expect(fixture.lines.filter((line) => line.startsWith(`set_status ${removalKey} `))).toHaveLength(1);
+    expect(fixture.lines.some((line) => line.startsWith("log --level="))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"'))).toBe(false);
+    expect(fixture.lines.some((line) => line.includes('"method":"surface.trigger_flash"'))).toBe(false);
+  } finally { await fixture.cleanup(); }
+});
+
+test("failed removal retry precedes a hanging teardown progress clear within the cleanup deadline", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  let hangTeardownProgressClear = false;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearAttempts += 1;
+        return clearAttempts === 1 ? "NOT OK" : "OK";
+      }
+      if (hangTeardownProgressClear && line.startsWith("clear_progress ")) {
+        await new Promise<void>(() => {});
+      }
+      return "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-before-progress-session";
+    const sourceId = "remove-clear-before-progress";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Priority source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearAttempts === 1);
+    hangTeardownProgressClear = true;
+    const teardownStart = fixture.lines.length;
+    const started = performance.now();
+    await pi.lifecycle("session_shutdown");
+
+    const teardownLines = fixture.lines.slice(teardownStart);
+    expect(teardownLines[0]).toBe(`clear_status ${key} --tab=${fixture.workspaceId}`);
+    expect(teardownLines[1]).toBe(`clear_progress --tab=${fixture.workspaceId}`);
+    expect(clearAttempts).toBe(2);
+    expect(performance.now() - started).toBeLessThan(1_100);
+  } finally { await fixture.cleanup(); }
+});
+
+test("an in-flight acknowledged removal clear is awaited at progress-disabled teardown without a retry", async () => {
+  let key = "";
+  let clearStarted = false;
+  let releaseClear!: () => void;
+  const clearGate = new Promise<void>((resolve) => { releaseClear = resolve; });
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearStarted = true;
+        await clearGate;
+      }
+      return "OK";
+    },
+  );
+  try {
+    process.env.PI_CMUX_PRESENCE_PROGRESS = "false";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-clear-acknowledged-session";
+    const sourceId = "remove-clear-acknowledged";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Acknowledged source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearStarted);
+    const shutdown = pi.lifecycle("session_shutdown");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(1);
+
+    releaseClear();
+    await shutdown;
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(1);
+  } finally { await fixture.cleanup(); }
+});
+
+test("removal before client establishment never creates a teardown clear intent", async () => {
+  const sessionId = "remove-pre-client-session";
+  const sourceId = "remove-pre-client";
+  let pi: ReturnType<typeof fakePi>;
+  const fixture = await presenceFixture(async () => {
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 1,
+      source: { id: sourceId, label: "Pre-client source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId },
+    });
+  });
+  try {
+    pi = fakePi();
+    extension(pi.api as never);
+    const key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    await pi.lifecycle("session_shutdown");
+
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(0);
+  } finally { await fixture.cleanup(); }
+});
+
+test("an older clear acknowledgement cannot erase a newer failed removal intent", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  let firstClearStarted = false;
+  let releaseFirstClear!: () => void;
+  const firstClearGate = new Promise<void>((resolve) => { releaseFirstClear = resolve; });
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    async (line) => {
+      if (!key || !line.startsWith(`clear_status ${key} `)) return "OK";
+      clearAttempts += 1;
+      if (clearAttempts === 1) {
+        firstClearStarted = true;
+        await firstClearGate;
+        return "OK";
+      }
+      return clearAttempts === 2 ? "NOT OK" : "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-overlap-session";
+    const sourceId = "remove-overlap";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: sourceId, label: "Overlapping source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    update(1);
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => firstClearStarted);
+    update(3);
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 4, source: { id: sourceId } });
+
+    releaseFirstClear();
+    await waitFor(() => clearAttempts === 2);
+    await pi.lifecycle("session_shutdown");
+
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(3);
+  } finally { await fixture.cleanup(); }
+});
+
+test("a failed removal followed by reactivation uses one teardown clear for the retained source", async () => {
+  let key = "";
+  let clearAttempts = 0;
+  const fixture = await presenceFixture(
+    undefined,
+    undefined,
+    undefined,
+    (line) => {
+      if (key && line.startsWith(`clear_status ${key} `)) {
+        clearAttempts += 1;
+        return clearAttempts === 1 ? "NOT OK" : "OK";
+      }
+      return "OK";
+    },
+  );
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "remove-reactivated-session";
+    const sourceId = "remove-reactivated";
+    key = presenceStatusKey(sourceId, fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const update = (sequence: number) => pi.emit(PI_PRESENCE_UPDATE_EVENT, {
+      version: 1, sessionId, generation: 1, sequence,
+      source: { id: sourceId, label: "Reactivated source", kind: "task" },
+      state: "running", counts: { active: 1, completed: 0, failed: 0 }, attention: "none",
+    });
+    update(1);
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} `)));
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 2, source: { id: sourceId } });
+    await waitFor(() => clearAttempts === 1);
+    update(3);
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} `)).length === 2);
+
+    await pi.lifecycle("session_shutdown");
+    expect(fixture.lines.filter((line) => line.startsWith(`clear_status ${key} `))).toHaveLength(2);
   } finally { await fixture.cleanup(); }
 });
 

@@ -75,7 +75,7 @@ native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|
 
 ### consumer-side `pi-presence:remove:v1`
 
-이 event에는 별도 환경 변수가 없습니다. consumer는 ready `capabilities`에 `presence-remove-v1`을 광고하며, 수락된 외부 remove가 실제 retained 상태를 철회했을 때만 그 source의 status를 clear합니다. 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block을 다시 계산합니다. tombstone을 향한 더 높은 remove는 수락되어 fence만 전진시키므로 status clear를 만들지 않습니다.
+이 event에는 별도 환경 변수가 없습니다. consumer는 ready `capabilities`에 `presence-remove-v1`을 광고하며, 수락된 외부 remove가 실제 retained 상태를 철회했을 때만 그 source의 status를 clear합니다. 확립된 sidebar client가 보낸 최신 clear가 확인되지 않으면 source 상한 안의 idempotent clear intent 하나를 client teardown까지 보관해 그 teardown에서 한 번 우선 재시도하며, polling이나 이후 event에 따른 재시도는 하지 않습니다. 확인된 clear는 재시도하지 않습니다. 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block을 다시 계산합니다. tombstone을 향한 더 높은 remove는 수락되어 fence만 전진시키므로 status clear를 만들지 않습니다.
 
 remove는 `PI_CMUX_PRESENCE_LOG`, notification 정책, flash 정책, `PI_CMUX_PRESENCE_FEED`와 무관하게 새 generic log·notification·flash·feed를 만들지 않습니다. 이미 만든 notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다. 정확한 `pi-subagent` source의 remove는 보류된 child terminal 상태를 무효화하며, 그 상태가 보류했던 local parent attention은 기존 notification/flash policy와 capability gate를 적용한 local fallback으로만 처리할 수 있습니다.
 

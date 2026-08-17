@@ -62,12 +62,22 @@ const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+type StatusClearAttempt = {
+  /** Identifies the current attempt for a status key despite overlapping removes. */
+  readonly token: object;
+  readonly client: PresenceClient;
+  /** Resolves to whether cmux acknowledged this exact attempted clear. */
+  readonly outcome: Promise<boolean>;
+};
+
 type DetachedSession = {
   client: PresenceClient | null;
   sessionId: string | null;
   officialHook: boolean;
   statusScope: string | undefined;
   retainedEvents: PresenceUpdate[];
+  /** Latest unacknowledged clear attempt by status key; bounded by source fences. */
+  pendingStatusClears: Map<string, StatusClearAttempt>;
 };
 
 type PendingSubagentAttention = {
@@ -115,6 +125,8 @@ export class PresenceRuntime {
   private readonly todo = new TodoProgressAdapter();
   private client: PresenceClient | null = null;
   private clientCloseBarrier: Promise<void> = Promise.resolve();
+  /** Latest attempts only, bounded by the registry's retained-source cap. */
+  private pendingStatusClears = new Map<string, StatusClearAttempt>();
   private contextProvider: ContextProvider | null = null;
   private sessionId: string | null = null;
   private sessionEpoch = 0;
@@ -181,7 +193,7 @@ export class PresenceRuntime {
         this.invalidateSubagentNotifications();
       }
       if (result.removed) {
-        void this.client?.clearStatus(this.statusKey(event.source.id));
+        this.clearRemovedStatus(this.statusKey(event.source.id));
       }
       this.renderProgress();
       if (!this.officialHook && this.config.metaBlock) {
@@ -443,6 +455,7 @@ export class PresenceRuntime {
       officialHook: this.officialHook,
       statusScope: this.statusScope,
       retainedEvents: this.registry.snapshot(),
+      pendingStatusClears: this.pendingStatusClears,
     };
     this.client = null;
     this.disableCurrentSession();
@@ -451,6 +464,9 @@ export class PresenceRuntime {
 
   private disableCurrentSession(): void {
     this.registry.stop();
+    // Keep detached attempts alive for their in-flight acknowledgements while
+    // giving a replacement session an independent, bounded cleanup scope.
+    this.pendingStatusClears = new Map();
     this.contextProvider = null;
     this.sessionId = null;
     this.localSequence = 0;
@@ -873,6 +889,25 @@ export class PresenceRuntime {
     }
   }
 
+  /**
+   * A remove is already accepted in the event registry before this observer
+   * write. Track only an actual clear issued through the captured current
+   * client. The token prevents an older acknowledgement from erasing a newer
+   * failed remove for the same status key.
+   */
+  private clearRemovedStatus(key: string): void {
+    const client = this.client;
+    if (!client || !this.config.sidebar) return;
+
+    const intents = this.pendingStatusClears;
+    const token = {};
+    const outcome = client.clearStatus(key).catch(() => false);
+    intents.set(key, { token, client, outcome });
+    void outcome.then((acknowledged) => {
+      if (acknowledged && intents.get(key)?.token === token) intents.delete(key);
+    });
+  }
+
   private renderProgress(): void {
     const next = selectProgress(this.registry.snapshot());
     if (!next) {
@@ -1024,14 +1059,37 @@ export class PresenceRuntime {
       };
       const timer = setTimeout(abort, budgetMs);
       try {
-        const bestEffort = async (operation: () => Promise<void>) => {
+        const bestEffort = async (operation: () => Promise<unknown>) => {
           if (expired) return;
           await operation().catch(() => {});
         };
 
+        // Resolve pending removal clears first: a hung progress teardown must
+        // not consume the aggregate cleanup budget before their one retry.
+        // A retained source reactivated after a failed remove shares its exact
+        // key with that retry, so consume the key here rather than issuing a
+        // duplicate retained-event clear below.
+        const retainedStatusKeys = new Set(
+          detached.retainedEvents.map((event) => presenceStatusKey(event.source.id, detached.statusScope)),
+        );
+        for (const [key, attempt] of detached.pendingStatusClears) {
+          let acknowledged = false;
+          if (!expired) {
+            try {
+              acknowledged = await attempt.outcome;
+            } catch {
+              // A failed observer write gets one teardown retry below.
+            }
+          }
+          const clearsRetainedStatus = retainedStatusKeys.delete(key);
+          if (!acknowledged || clearsRetainedStatus) {
+            await bestEffort(() => attempt.client.clearStatus(key));
+          }
+        }
+
         await bestEffort(() => client.clearProgress());
-        for (const event of detached.retainedEvents) {
-          await bestEffort(() => client.clearStatus(presenceStatusKey(event.source.id, detached.statusScope)));
+        for (const key of retainedStatusKeys) {
+          await bestEffort(() => client.clearStatus(key));
         }
 
         if (!detached.officialHook) {
