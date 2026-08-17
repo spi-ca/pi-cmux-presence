@@ -422,6 +422,53 @@ test("external generation and none churn is bounded and coalesced before cmux at
   }
 });
 
+test("an accepted update resolving input cancels its delayed attention but later waits remain eligible", async () => {
+  const socket = await fixture();
+  try {
+    const clock = new ManualRuntimeClock();
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, {
+      ...resolvePresenceConfig(), log: true, notificationPolicy: "all", flashPolicy: "attention",
+    }, clock);
+    const sessionId = "resolved-delayed-input-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+
+    // Exhaust the bucket so this interaction notification is delayed rather
+    // than emitted synchronously.
+    for (let sequence = 1; sequence <= 4; sequence += 1) {
+      runtime.handlePresenceUpdate({
+        version: 1, sessionId, generation: 1, sequence,
+        source: { id: `bucket-filler-${sequence}`, label: "Bucket filler", kind: "task" },
+        state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error",
+      });
+    }
+    await waitFor(() => notifications(socket.lines).length === 4, 500);
+
+    runtime.handlePresenceUpdate(askUserUpdate(sessionId, 1, "info"));
+    // This accepted update leaves interaction-waiting before the next token
+    // refill, so the queued input attention must not fire at that boundary.
+    runtime.handlePresenceUpdate({
+      ...askUserUpdate(sessionId, 2, "none", false),
+      state: "running",
+      counts: { active: 1, completed: 0, failed: 0 },
+    });
+    clock.advance(1_000);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(notifications(socket.lines)).toHaveLength(4);
+
+    // The resolved lifecycle must not poison a later genuine input wait.
+    runtime.handlePresenceUpdate(askUserUpdate(sessionId, 3, "info"));
+    await waitFor(() => notifications(socket.lines).length === 5, 500);
+    expect(notifications(socket.lines)[4]?.params).toMatchObject({
+      title: "Pi needs your input",
+      body: "Pi needs your input",
+    });
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
 test("interaction info follows notification and flash policies with independent capabilities", async () => {
   const observe = async (
     notificationPolicy: "errors" | "background" | "settled" | "all" | "disabled",

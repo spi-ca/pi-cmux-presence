@@ -671,6 +671,12 @@ export class PresenceRuntime {
       ? formatInteractionWaitingPresentation(this.config.maxLabelChars)
       : null;
     const presentation = localPresentation ?? interactionPresentation;
+    // A source update that resolves an interaction wait supersedes any
+    // rate-limited delayed input attention for that source. Keep other queued
+    // categories intact, and let a later wait begin a fresh lifecycle.
+    if (event.source.id !== LOCAL_SOURCE.id && interactionPresentation === null) {
+      this.discardPendingExternalInputAttention(event.source.id);
+    }
     const label = presentation?.sidebar ?? formatStateText(event, this.config.maxLabelChars);
     void this.client?.status(
       this.statusKey(event.source.id),
@@ -1106,6 +1112,10 @@ export class PresenceRuntime {
     for (const key of this.pendingExternalAttention.keys()) {
       if (key.startsWith(prefix)) this.pendingExternalAttention.delete(key);
     }
+  }
+
+  private discardPendingExternalInputAttention(sourceId: string): void {
+    this.pendingExternalAttention.delete(`${sourceId}\u0000input`);
   }
 
   private refillExternalAttentionTokens(): void {
