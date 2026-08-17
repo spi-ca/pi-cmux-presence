@@ -1,6 +1,6 @@
 # `pi-presence:update:v1`·`pi-presence:remove:v1` 이벤트 계약
 
-이 채널은 같은 Pi 프로세스 event bus의 선택적 presence 입력입니다. `update`는 상태를 기록하고 consumer-side `remove`는 이미 수락된 외부 source의 retained 상태를 철회합니다. durable transport나 cross-process API가 아니며 reload/세션 종료 후 생산자는 필요하면 현재 상태를 다시 발행해야 합니다.
+이 채널은 같은 Pi 프로세스 event bus의 선택적 presence 입력입니다. `update`는 상태를 기록하고 consumer-side `remove`는 이미 수락된 외부 source의 retained 상태를 철회합니다. durable transport나 cross-process API가 아니며 reload/세션 종료 후 생산자는 필요하면 현재 상태를 다시 발행해야 합니다. 같은 프로세스에서 event bus에 접근할 수 있는 코드의 source ID는 인증되지 않으므로, 이 계약은 `pi-subagent` 등의 정확한 ID를 consumer routing·표시 정책에만 사용하며 same-process spoofing을 wire contract로 해결하지 않습니다.
 
 ![ready 광고부터 엄격한 update 검증, retained 상태 렌더링과 session teardown까지의 이벤트 흐름](diagram/event-flow.svg)
 
@@ -48,7 +48,7 @@ payload와 중첩 객체에는 다음 키 외의 키를 넣을 수 없습니다.
 
 `source.kind`는 위 safe text 제약만 있는 기존 문자열 필드이며, 이 계약은 kind enum이나 interaction 전용 DTO를 추가하지 않습니다. 다만 consumer는 정확히 `source.kind: "interaction"`, `state: "waiting"`이고 `attention`이 `"info"`·`"none"`·생략 중 하나인 수락 update에 한해 아래의 고정 interaction-waiting 표시를 적용합니다. 이 조건은 producer가 사용자 입력을 실제로 기다린다는 일반적 인증이나 Pi의 모든 입력 대기 감지가 아니라, producer가 명시한 특정 handover를 표시하는 소비자 측 분기입니다. `attention: "error" | "success"` 또는 다른 state/kind는 일반 외부 update로 남습니다.
 
-이 기능은 기존 `pi-presence:update:v1` payload의 해석만 바꾸며 root key, nested key, event 이름, ready capability를 추가하거나 바꾸지 않습니다. `pi-presence:summary:v1`은 이 consumer가 구독하거나 발행하는 채널이 아니며 의도적으로 지원하지 않습니다.
+이 기능은 기존 `pi-presence:update:v1` payload의 해석만 바꾸며 root key, nested key, event 이름, ready capability를 추가하거나 바꾸지 않습니다. `pi-presence:summary:v1`은 이 consumer가 구독하거나 발행하는 채널이 아니며 의도적으로 지원하지 않습니다. update와 remove parser는 shape 확인 전에 proxy를 거부하고 own data descriptor만 독립 DTO로 snapshot하므로 accessor/proxy가 검증 뒤 payload를 바꾸지 못합니다.
 
 ## 엄격한 V1 remove 객체
 
@@ -95,11 +95,13 @@ cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress�
 
 `attention: "error"` 또는 `"success"`인 interaction-kind update는 고정 문구·privacy 특례가 아닌 generic 상태/label 렌더링과 기존 attention 정책을 사용합니다. 이 consumer는 ask-user producer를 구현하거나 interaction의 실행, 재시도, 취소, 권한 요청을 소유하지 않습니다.
 
-`attention: "info" | "success" | "error"`는 log/notification/flash 요청입니다. V1 `log`는 `PI_CMUX_PRESENCE_LOG`만 충족하면 전송되고, V2 notification·flash는 레거시 kill switch, [`configuration.md`](configuration.md)의 policy 및 해당 V2 capability를 모두 충족할 때만 전송됩니다. `none` 또는 생략은 요청하지 않습니다. policy가 `background`여도 cmux focus나 foreground 여부를 검사하지 않으며, focus 기반 suppress는 지원하지 않습니다. local Pi cancellation과 정확한 `pi-subagent` producer cancellation은 status-only `attention: "none"`이다. 따라서 permissive한 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log를 요청하지 않습니다.
+`attention: "info" | "success" | "error"`는 log/notification/flash 요청입니다. V1 `log`는 `PI_CMUX_PRESENCE_LOG`만 충족하면 전송되고, V2 notification·flash는 레거시 kill switch, [`configuration.md`](configuration.md)의 policy 및 해당 V2 capability를 모두 충족할 때만 전송됩니다. `none` 또는 생략은 요청하지 않습니다. generic source는 source별로 동일 attention·state·누적 terminal count의 반복을 한 lifecycle로 semantic dedupe합니다. 아직 현재 session이 소유한 cmux client의 초기화가 끝나지 않았다면 external event는 이 dedupe를 소비하지 않으므로, 초기화 뒤의 첫 deliverable lifecycle은 정상 dispatch됩니다. failed/error 또는 completed/info·success count의 새 증가, count reset/generation 변경, state/attention 전환, 또는 `waiting`을 벗어난 뒤의 새 interaction wait만 새 lifecycle 후보가 될 수 있습니다.
+
+외부 producer의 dispatch는 session-wide bounded queue도 거칩니다. 처음 4개는 즉시 보낼 수 있고, 그 뒤에는 고정 1초마다 최대 하나만 추가로 보냅니다. 대기 항목은 최대 64개이며 같은 source·category(`input`, `error`, 기타)는 최신 항목으로 coalesce하고 error가 input·기타보다 우선합니다. 따라서 generation/`none` churn이 log·notification·flash storm을 지속할 수 없으며, input/error lifecycle은 가능한 한 대기·우선 dispatch됩니다. 이 상한은 환경 변수로 조절하지 않는 consumer safety bound입니다. policy가 `background`여도 cmux focus나 foreground 여부를 검사하지 않으며, focus 기반 suppress는 지원하지 않습니다. local Pi cancellation과 정확한 `pi-subagent` producer cancellation은 status-only `attention: "none"`이다. 따라서 permissive한 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log를 요청하지 않습니다.
 
 ### 정확한 `pi-subagent` source의 attention 집계
 
-일반 producer는 위 attention을 즉시 독립적으로 처리합니다. 단, `source.label`이나 `source.kind`가 아니라 정확히 `source.id: "pi-subagent"`인 수락된 update에는 소비자 측 terminal 집계 정책이 적용됩니다. 이는 `pi-subagent`를 dependency로 만들거나 그 외부 구현의 lifecycle을 소유한다는 뜻이 아닙니다.
+일반 producer는 위 attention을 즉시 독립적으로 처리합니다. 단, `source.label`이나 `source.kind`가 아니라 정확히 `source.id: "pi-subagent"`인 수락된 update에는 소비자 측 terminal 집계 정책이 적용됩니다. 해당 source의 interaction-waiting update도 누적 baseline을 갱신하고 generation 변경·count reset이면 보류 terminal burst를 무효화하지만, interaction 자체를 terminal 후보로 만들지는 않습니다. 이는 `pi-subagent`를 dependency로 만들거나 그 외부 구현의 lifecycle을 소유한다는 뜻이 아닙니다.
 
 - `completed`·`failed`·`cancelled`의 **누적** count baseline을 같은 generation 안에서 비교합니다. success/info는 `completed`가 증가한 경우, error는 `failed`가 증가한 경우에만 terminal 후보가 됩니다. 취소 상태는 attention 후보가 아니며 `cancelled` 증가도 완료 attention을 만들지 않습니다.
 - 처음 보거나 generation이 바뀐 non-`none` attention은 이전 누적 이력이 없으므로 count `0`의 unknown live signal로만 처리합니다. 어느 누적 count라도 감소하면 baseline을 새 값으로 교체하고, 그 update의 **terminal-attention 해석**과 쌓인 burst를 fail-closed로 버립니다. update 자체가 이미 수락되었으므로 status와 progress는 새 값으로 렌더링됩니다. 무효화된 burst가 local parent attention을 보류하고 있었다면 producer payload를 복사하지 않는 local fallback으로 복원합니다.
@@ -138,7 +140,7 @@ consumer는 session 시작 뒤 `pi-presence:ready:v1` consumer advertisement를 
 
 현재 consumer advertisement는 `id: "pi-cmux-presence"`, capabilities `cmux-status`, `cmux-progress`, `cmux-attention`, `presence-remove-v1`입니다. session startup은 이 frozen advertisement를 먼저 한 번 내고, 이어 frozen consumer-less request를 정확히 한 번 냅니다. consumer는 자기 request의 exact object identity를 무시하므로 local/todo를 자기 자신에게 replay하지 않습니다.
 
-`consumer`가 **없는** 유효한 matching-session ready는 replay/discovery **request**다. 활성 consumer는 외부 request 하나에 frozen advertisement 하나를 best-effort로 응답한 뒤 retained local `pi`/`pi-todo` state를 각각 새 sequence 및 `attention: "none"`으로 정확히 한 번 replay한다. `consumer`가 **있는** 유효한 ready는 passive consumer **advertisement**일 뿐이며 consumer는 response하거나 local/todo replay를 해서는 안 된다. 따라서 여러 producer/consumer의 advertisement가 replay fan-out을 만들지 않는다. consumer는 자신의 advertisement/request identity를 parsing 전에 무시하고, response 중 nested request도 무시한다. malformed·stale·비활성 session event는 무시한다.
+`consumer`가 **없는** 유효한 matching-session ready는 replay/discovery **request**다. 활성 consumer는 외부 request 하나에 frozen advertisement 하나를 best-effort로 응답한 뒤 retained local `pi`/`pi-todo` state를 각각 새 sequence 및 `attention: "none"`으로 정확히 한 번 replay한다. `consumer`가 **있는** 유효한 ready는 passive consumer **advertisement**일 뿐이며 consumer는 response하거나 local/todo replay를 해서는 안 된다. incoming ready root·consumer·capability array는 reflection 전에 proxy를 거부하고 own data descriptor로 snapshot하므로, `Array.isArray()`를 통과하는 proxied capability array도 수락하지 않는다. 따라서 여러 producer/consumer의 advertisement가 replay fan-out을 만들지 않는다. consumer는 자신의 advertisement/request identity를 parsing 전에 무시하고, response 중 nested request도 무시한다. malformed·stale·비활성 session event는 무시한다.
 
 일반 producer는 matching consumer-less request에 retained state를 새 sequence 및 `attention: "none"`으로 replay할 수 있다. replay는 현재 status를 복원할 뿐 과거 성공·error를 다시 notification/flash하지 않는다. startup advertisement/request는 producer-first load order를, 외부 request에 대한 consumer response는 consumer-first load order를 보정한다. event emit 실패는 이 선택적 discovery 응답과 replay를 Pi 작업의 실패로 바꾸지 않는다. ready root, consumer, capability array 및 consumer request는 frozen output이며 mutation observer가 protocol state를 바꾸지 못한다.
 

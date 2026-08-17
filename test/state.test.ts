@@ -42,7 +42,15 @@ describe("generic presence event state", () => {
     expect(parsePresenceUpdate({ ...base, progress: { ...base.progress, extra: true } })).toBeNull();
     expect(parsePresenceUpdate({ ...base, usage: { tokens: 1, extra: true } })).toBeNull();
     expect(parsePresenceUpdate(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
+    expect(parsePresenceUpdate(new Proxy(base, {}))).toBeNull();
     expect(parsePresenceUpdate({ ...base, source: new Proxy(base.source, { get() { throw new Error("nope"); } }) })).toBeNull();
+    expect(parsePresenceUpdate({ ...base, counts: new Proxy(base.counts, {}) })).toBeNull();
+    const accessorRoot = { ...base };
+    Object.defineProperty(accessorRoot, "source", { enumerable: true, get() { return base.source; } });
+    const accessorCounts = { ...base, counts: { ...base.counts } };
+    Object.defineProperty(accessorCounts.counts, "completed", { enumerable: true, get() { return 0; } });
+    expect(parsePresenceUpdate(accessorRoot)).toBeNull();
+    expect(parsePresenceUpdate(accessorCounts)).toBeNull();
   });
   test("strictly parses remove envelopes as a total function", () => {
     const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
@@ -59,7 +67,11 @@ describe("generic presence event state", () => {
     expect(parsePresenceRemove({ ...remove, sequence: Number.MAX_SAFE_INTEGER + 1 })).toBeNull();
     expect(parsePresenceRemove(Object.create(null))).toBeNull();
     expect(parsePresenceRemove(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
+    expect(parsePresenceRemove(new Proxy(remove, {}))).toBeNull();
     expect(parsePresenceRemove({ ...remove, source: new Proxy(remove.source, { get() { throw new Error("nope"); } }) })).toBeNull();
+    const accessorRemove = { ...remove };
+    Object.defineProperty(accessorRemove, "source", { enumerable: true, get() { return remove.source; } });
+    expect(parsePresenceRemove(accessorRemove)).toBeNull();
   });
   test("shares update/remove ordering and retains removal tombstone fences", () => {
     const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
@@ -118,6 +130,7 @@ describe("generic presence event state", () => {
     expect(parsePresenceReady({ version: 1, sessionId, source: "no" })).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId: "bad\u202e" })).toBeNull();
     const sparseCapabilities = new Array<string>(1);
+    const proxiedCapabilities = new Proxy(["cmux-status"], {});
     const accessorCapabilities = ["cmux-status"];
     Object.defineProperty(accessorCapabilities, "0", { enumerable: true, get() { throw new Error("nope"); } });
     const inheritedRoot = Object.create({ version: 1, sessionId });
@@ -125,6 +138,7 @@ describe("generic presence event state", () => {
     const rootAccessor = { version: 1, sessionId };
     Object.defineProperty(rootAccessor, "consumer", { enumerable: true, get() { throw new Error("nope"); } });
     expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: sparseCapabilities } })).toBeNull();
+    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: proxiedCapabilities } })).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: accessorCapabilities } })).toBeNull();
     expect(parsePresenceReady(inheritedRoot)).toBeNull();
     expect(parsePresenceReady({ version: 1, sessionId, consumer: inheritedConsumer })).toBeNull();

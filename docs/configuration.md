@@ -52,6 +52,8 @@ native notification/flash의 precedence는 다음과 같습니다. 공식 cmux h
 
 notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 정확한 `pi-subagent`의 terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 현재 같은 종류 window를 연장하지 않지만, window가 닫힌 뒤에는 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. 활성 부모 error는 settlement를 기다리되 최초 error부터 최대 10초 후 한 번 dispatch하며, timeout만 그 부모 run의 뒤늦은 settlement를 fence합니다. 비활성 success grace가 닫히기 전에 부모가 아직 비활성인 동안 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. 취소와 ready replay(`attention: "none"`)는 attention을 만들지 않습니다.
 
+별도 환경 변수 없이 external attention 출력에는 session-wide safety bound가 적용됩니다. 처음 4개 attention은 즉시 처리하고 그 뒤에는 1초마다 하나만 추가 처리합니다. 대기 항목은 최대 64개이며 같은 source·attention category는 최신 상태로 coalesce하고 error가 우선합니다. 이는 policy가 허용한 genuine input/error lifecycle을 가능한 한 보존하면서 same-process producer의 generation/`none` churn이 notification·flash·log storm을 지속하지 못하게 하는 고정 안전 한도입니다.
+
 ### 검토한 외부 cmux child profile
 
 이 패키지가 해석하는 외부 호환 profile 식별자는 정확히 `PI_CMUX_PROFILE=subagent-child-v1` 하나입니다. 이 exact profile이 있어야만 다음 channel별 suppression을 적용합니다.
