@@ -12,7 +12,7 @@ bun run ci
 bun pm pack --dry-run
 ```
 
-`ci`는 타입 검사와 테스트를 순서대로 실행합니다. `pack --dry-run`은 배포하지 않고 패키지 포함 파일을 확인합니다.
+`ci`는 warning을 오류로 처리하는 Biome lint, 타입 검사, 테스트를 순서대로 실행합니다. `pack --dry-run`은 배포하지 않고 패키지 포함 파일을 확인합니다.
 
 ## 프로젝트 구조
 

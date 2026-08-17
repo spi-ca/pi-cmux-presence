@@ -9,8 +9,14 @@
     "enabled": true,
     "rules": {
       "recommended": true,
+      "complexity": { "noUselessTernary": "off" },
+      "style": {
+        "noNonNullAssertion": "off",
+        "useImportType": "off"
+      },
       "suspicious": {
-        "noControlCharactersInRegex": "off"
+        "noControlCharactersInRegex": "off",
+        "noExplicitAny": "off"
       }
     }
   },

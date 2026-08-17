@@ -13,7 +13,7 @@
   "scripts": {
     "test": "bun test --pass-with-no-tests",
     "check": "bunx tsc --noEmit",
-    "lint": "biome lint .",
+    "lint": "biome lint --error-on-warnings .",
     "ci": "bun run lint && bun run check && bun run test",
     "diagram:render": "set -e; for src in docs/diagram/*.mmd; do stem=\"${src%.mmd}\"; bunx @mermaid-js/mermaid-cli -p docs/diagram/puppeteer-config.json -c docs/diagram/mermaid-config.json -i \"$src\" -o \"$stem.svg\" -b white; bunx @mermaid-js/mermaid-cli -p docs/diagram/puppeteer-config.json -c docs/diagram/mermaid-config.json -i \"$src\" -o \"$stem.png\" -b white -s 2; done"
   },
