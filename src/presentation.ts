@@ -37,6 +37,17 @@ export interface LocalTurnPresentation {
   readonly body: string;
 }
 
+export interface InteractionWaitingPresentation extends LocalTurnPresentation {
+  readonly progress: string;
+}
+
+/** Only an explicit interaction wait can use the fixed user-input presentation. */
+export function isInteractionWaiting(event: PresenceUpdate): boolean {
+  return event.source.kind === "interaction"
+    && event.state === "waiting"
+    && (event.attention === "info" || event.attention === "none" || event.attention === undefined);
+}
+
 /** Fixed local wording deliberately excludes every assistant and user payload. */
 export function formatLocalTurnPresentation(
   state: PresenceUpdate["state"],
@@ -56,6 +67,31 @@ export function formatLocalTurnPresentation(
       maxCodePoints,
     }),
     body,
+  };
+}
+
+/** Fixed interaction wording deliberately excludes every producer payload. */
+export function formatInteractionWaitingPresentation(
+  maxCodePoints: number,
+): InteractionWaitingPresentation {
+  const text = "Pi needs your input";
+  return {
+    sidebar: boundedPresenceText(text, {
+      maxBytes: CMUX_TEXT_BYTES.v1Text,
+      maxCodePoints,
+    }),
+    title: boundedPresenceText(text, {
+      maxBytes: CMUX_TEXT_BYTES.notificationTitle,
+      maxCodePoints,
+    }),
+    body: boundedPresenceText(text, {
+      maxBytes: CMUX_TEXT_BYTES.notificationBody,
+      maxCodePoints,
+    }),
+    progress: boundedPresenceText(text, {
+      maxBytes: CMUX_TEXT_BYTES.v1Text,
+      maxCodePoints,
+    }),
   };
 }
 

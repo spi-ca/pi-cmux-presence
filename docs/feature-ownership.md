@@ -10,7 +10,8 @@
 | --- | --- | --- | --- |
 | 부모 Pi 상태·usage | Pi lifecycle/usage를 관찰해 fixed local summary로 surface status를 표시 | 관여하지 않음 | `agent_settled`에서 최종화(미지원 host는 `agent_end` fallback, `isIdle()`이 명시적으로 `false`면 보류); assistant body/prompt/path/tool content는 표시하지 않음 |
 | todo 진행률 | 검증한 `todo` 결과에서 count와 `completed/visible`만 계산 | 관여하지 않음 | task 텍스트는 전송하지 않음 |
-| subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 일반 transient producer는 passive/diagnostic ready capability 확인 뒤 update/remove를 발행하는 방식을 권장. `pi-subagent`는 이전 consumer 호환을 위해 update/remove를 의도적으로 ungated 발행 | package dependency 없음; 구형 consumer는 마지막 update를 session teardown까지 sticky하게 유지할 수 있음; label/kind는 special routing 조건이 아님 |
+| subagent 상태 | generic update를 검증해 status/progress로 렌더링하고 remove로 retained 상태를 철회. 정확한 `source.id: "pi-subagent"`는 누적 terminal attention을 한 번으로 집계하고 remove 시 파생 상태도 무효화 | 일반 transient producer는 passive/diagnostic ready capability 확인 뒤 update/remove를 발행하는 방식을 권장. `pi-subagent`는 이전 consumer 호환을 위해 update/remove를 의도적으로 ungated 발행 | package dependency 없음; 구형 consumer는 마지막 update를 session teardown까지 sticky하게 유지할 수 있음; label/kind는 이 exact source의 special routing 조건이 아님 |
+| interaction waiting handover | 정확히 `kind: "interaction"`·`state: "waiting"`이고 `attention`이 `"info"`·`"none"`·생략 중 하나인 generic V1 update를 고정 `Pi needs your input` status/제공된 progress로 표시 | producer가 기존 update/remove와 sequence fence를 소유 | consumer-only presentation이다. `info`만 기존 attention gate를 따르고 `none`·생략/replay는 status-only; `error`·`success`는 generic 처리. 모든 Pi 입력 대기 감지, 실행·취소·재시도 authority, 새 event/capability는 없음 |
 | root aggregate·child `inherit` | 관여하지 않음; 로드된 경우 수락한 event만 observer로 표시 | root aggregate 소유와 `inherit` child 정책은 producer가 결정 | consumer는 이를 의존·조정·두 package load-order로 검증하지 않음; extension이 없으면 이 consumer 동작도 없음 |
 | subagent 실행·취소·결과 | 관여하지 않음 | 실행 패키지가 authority를 유지 | scheduler, lease, reaper, cleanup 등의 실제 범위는 외부 구현의 계약 |
 | cmux 상태 스타일 | state별 고정 icon/color/priority, surface-scoped key | cmux 직접 mutation을 요구하지 않음 | V1 socket |
@@ -28,10 +29,10 @@
 - 공통 채널은 `pi-presence:update:v1`, `pi-presence:remove:v1`, `pi-presence:ready:v1`입니다.
 - wire DTO는 두 저장소에 의도적으로 중복 선언합니다. 런타임 package dependency나 shared lifecycle 모듈을 만들지 않습니다.
 - `ready.consumer`는 passive/diagnostic UI capability 힌트이며 인증·명령 채널이나 mandatory gate가 아닙니다. 일반 transient producer에는 matching ready capability 확인을 권장하지만, `pi-subagent`는 이전 consumer 호환을 위해 update/remove를 의도적으로 ungated 발행합니다. 생략된 `consumer`는 matching active consumer의 best-effort advertisement와 local/todo replay response를 요청하고, consumer-bearing advertisement는 response나 replay를 유발하지 않습니다. startup advertisement/request는 producer-first, 이 response는 consumer-first load order를 각각 보정합니다.
-- `pi-cmux-presence`는 모든 source에 generic update 검증을 적용하고 `pi`·`pi-todo`는 local source로 예약합니다. 단, 정확한 `source.id: "pi-subagent"`의 **attention**만 누적 count·parent settlement 기반 special policy를 사용합니다. 다른 ID와 `source.label`/`source.kind`에는 적용하지 않습니다.
+- `pi-cmux-presence`는 모든 source에 generic update 검증을 적용하고 `pi`·`pi-todo`는 local source로 예약합니다. 단, 정확한 `source.id: "pi-subagent"`의 **attention**만 누적 count·parent settlement 기반 special policy를 사용합니다. 다른 ID와 `source.label`/`source.kind`에는 적용하지 않습니다. 별도로 interaction waiting 표시는 exact `source.kind`·state·attention 조합의 consumer-side presentation일 뿐 source identity routing이나 authority 정책이 아닙니다.
 - `pi-subagent` 같은 producer는 필요하면 안정된 `source.id: "pi-subagent"`를 사용할 수 있습니다. 이 ID가 있어도 consumer의 수락·부재가 producer의 root aggregate 소유, 실행·결과·취소·cleanup authority를 바꾸어서는 안 됩니다. managed child가 이 extension을 로드하지 않으면 그 child에 이 consumer의 표시·알림 동작은 요구되지 않습니다.
 - event listener, 잘못된 host session ID와 cmux socket 실패는 lifecycle 결과를 바꾸지 않습니다. presence는 focus polling을 하거나 foreground/background handoff를 제어할 trusted read-only capability가 없습니다. focused-banner suppression과 notification retention은 cmux 소유입니다. local Pi와 `pi-subagent` cancellation은 status-only `attention: "none"`으로 남으며 permissive policy도 native notification/flash로 승격하지 않습니다.
-- generic producer label은 형식 검증과 byte-safe 축약만 거치므로 producer가 민감정보와 신뢰할 수 없는 원문을 제외합니다.
+- generic producer label은 형식 검증과 byte-safe 축약만 거치므로 producer가 민감정보와 신뢰할 수 없는 원문을 제외합니다. interaction waiting의 고정 문구는 그 제한된 profile에서 label·progress label·prompt 같은 producer payload를 복사하지 않는 privacy boundary이며, `pi-presence:summary:v1` 같은 별도 handover 채널을 지원하지 않습니다.
 
 ## `pi-cmux` 비교
 
@@ -45,7 +46,7 @@
 | `/cmv`, `/cmh`, `/cmo`, `/cmt` | 미지원 | `pi-cmux`를 별도 유지할 때만 사용 |
 | review/continue/worktree/zoxide workflow | 미지원 | presence에 추가하지 않음 |
 | tool/file별 상세 sidebar log | 부분 지원 | attention log만 제공; raw 도구 인수·출력은 privacy상 제외 |
-| 정확한 permission/input-needed 상태 | 부분 지원 | generic producer가 `waiting`/attention을 제공할 수 있으나 Pi 자체의 모든 대기 이유를 추론하지 않음. `pi-subagent`의 `waiting`은 scheduler queued-only이며 handoff 표지가 아님 |
+| 정확한 permission/input-needed 상태 | 제한된 consumer 표시 지원 | 정확히 `kind: "interaction"`·`waiting`·`info`/`none`/생략인 generic update만 `Pi needs your input`으로 고정 표시. Pi 자체의 모든 input/permission wait를 추론하지 않으며 `error`/`success`는 generic 처리 |
 | notification history 읽기·mark-read·jump | 미지원 | 생성만 담당; 사용자 notification center 소유권 유지 |
 | surface 이동 뒤 workspace 재탐색 | 미지원 | 현재 session 시작 시 받은 exact workspace/surface를 사용 |
 | focus 기반 attention suppress | 미지원 | 신뢰할 수 있는 read-only focus capability가 없어 foreground/background를 판별하지 않음 |

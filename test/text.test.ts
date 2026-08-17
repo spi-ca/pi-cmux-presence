@@ -3,9 +3,11 @@ import type { PresenceUpdate } from "../src/events.js";
 import {
   formatAttentionTitle,
   formatAutoTitle,
+  formatInteractionWaitingPresentation,
   formatLocalTurnPresentation,
   formatProgressText,
   formatStateText,
+  isInteractionWaiting,
   aggregateMetadata,
   deriveTerminalState,
   selectProgress,
@@ -93,6 +95,51 @@ describe("UTF-8 bounded presence text", () => {
       expect(Buffer.byteLength(rendered.body, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.notificationBody);
       expect(`${rendered.sidebar}\n${rendered.title}\n${rendered.body}`).not.toContain(canary);
     }
+  });
+
+  test("formats only explicit interaction waits as fixed user-input wording", () => {
+    const canary = "ASK_USER_LABEL_CANARY /private/PATH_CANARY RAW_PROMPT_CANARY";
+    const askUser: PresenceUpdate = {
+      ...event(canary, canary),
+      source: { id: "ask-user", label: canary, kind: "interaction" },
+      state: "waiting",
+      attention: "info",
+    };
+    const expected = {
+      sidebar: "Pi needs your input",
+      title: "Pi needs your input",
+      body: "Pi needs your input",
+      progress: "Pi needs your input",
+    };
+
+    expect(formatInteractionWaitingPresentation(96)).toEqual(expected);
+    for (const candidate of [askUser, { ...askUser, attention: "none" as const }, { ...askUser, attention: undefined }]) {
+      expect(isInteractionWaiting(candidate)).toBe(true);
+    }
+    for (const candidate of [
+      { ...askUser, attention: "error" as const },
+      { ...askUser, attention: "success" as const },
+      { ...askUser, state: "error" as const },
+      { ...askUser, state: "success" as const },
+      { ...askUser, state: "running" as const },
+      { ...askUser, source: { ...askUser.source, kind: "task" } },
+    ]) {
+      expect(isInteractionWaiting(candidate)).toBe(false);
+      expect(formatStateText(candidate, 96)).not.toBe(expected.sidebar);
+    }
+
+    const ordinaryTask = {
+      ...askUser,
+      source: { id: "ordinary-task", label: "Ordinary task", kind: "task" },
+      counts: { active: 1, completed: 0, failed: 0 },
+      usage: undefined,
+    };
+    expect(formatStateText(ordinaryTask, 96)).toBe("Ordinary task: waiting · 1 active");
+    for (const value of Object.values(expected)) {
+      expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.notificationBody);
+      expect(value).not.toContain(canary);
+    }
+    expect(Buffer.byteLength(formatStateText({ ...ordinaryTask, source: { ...ordinaryTask.source, label: "😀".repeat(120) } }, 96), "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.v1Text);
   });
 
   test("selects todo progress before other eligible progress", () => {

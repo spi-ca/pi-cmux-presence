@@ -40,6 +40,8 @@ notification 정책은 다음과 같습니다.
 
 기본값은 계속 `background`이며 `settled`는 명시 opt-in입니다. 여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지는 focus polling을 하지 않고 신뢰할 수 있는 read-only focus capability도 사용하지 않습니다. focused surface의 banner를 보일지 억제할지는 cmux가 소유합니다.
 
+외부 interaction handover가 정확히 `source.kind: "interaction"`, `state: "waiting"`, `attention: "info"`이면 고정 표시 `Pi needs your input`에 대해 이와 같은 기존 gate를 적용합니다. 따라서 `info`가 `all`·`background` 등 현재 policy에서 허용되더라도 해당 channel의 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. 같은 profile에서 `attention: "none"` 또는 생략은 status/progress-only이며, ready replay도 attention을 만들지 않습니다. 이 동작을 위한 환경 변수·capability는 추가되지 않았고 `error`·`success`는 generic external attention 규칙으로 처리합니다.
+
 flash 정책은 다음과 같습니다.
 
 native notification/flash의 precedence는 다음과 같습니다. 공식 cmux hook이 우선하는 local completion은 이 패키지가 보내지 않으며, 검토한 child profile의 해당 channel suppression도 그 channel을 막습니다. 그 외에는 레거시 `false` kill switch가 policy보다 먼저 막고, policy가 허용한 경우에도 cmux가 해당 정확한 V2 capability를 광고해야만 전송합니다.
@@ -102,7 +104,7 @@ V1 상태·progress·log와 V2 notification body의 text 한도는 512 UTF-8 byt
 
 host session ID는 process-local 이벤트와 동일하게 control/bidi 문자가 없는 1–96 Unicode code points의 safe text여야 합니다. 누락·조회 오류·범위 위반이면 새 cmux client나 ready/update를 만들지 않고 해당 presence 세션을 비활성화하며, 이전 세션에서 소유한 status/progress/lifecycle/resume 출력은 직렬 teardown으로 정리합니다.
 
-## local Pi 표시와 notification 보존
+## local Pi와 interaction waiting 표시, notification 보존
 
 내장 Pi source의 sidebar와 native notification은 assistant response body·preview, user prompt, raw error, path, tool argument 또는 tool output을 조합하지 않는 고정 문구만 사용합니다.
 
@@ -114,6 +116,8 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 | `success` | `Pi · Response ready` | `Pi` | `Response ready` |
 | `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
 | `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
+
+외부 producer의 정확한 interaction profile(`source.kind: "interaction"`, `state: "waiting"`, `attention`이 `"info"`·`"none"`·생략 중 하나)도 label·progress label·기타 payload text 대신 sidebar와 제공된 progress에 `Pi needs your input`만 사용합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며, 해당 producer의 lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `info`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `none`·생략은 notification·flash·log 없이 표시만 갱신하므로 ready replay도 status-only입니다. `error`·`success`는 generic 표시와 attention 정책을 사용합니다.
 
 local terminal은 `agent_end`만으로 확정하지 않고 settlement를 의미하는 `agent_settled`에서 최종 publish합니다. hook context가 `isIdle()`을 제공하고 `false`를 반환하면 아직 idle이 아니므로 확정하지 않으며, context나 함수가 없으면 `agent_settled` hook 자체를 settlement 증거로 사용합니다. host가 그 hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
