@@ -49,6 +49,29 @@ test("entrypoint does not register observers when disabled", () => {
 type Hook = (event: any, context?: any) => unknown;
 type EventHandler = (payload: unknown) => unknown;
 
+function askUserUpdate(
+  sessionId: string,
+  sequence: number,
+  attention: "info" | "none" = "info",
+  withProgress = true,
+): PresenceUpdate {
+  return {
+    version: 1,
+    sessionId,
+    generation: 1,
+    sequence,
+    source: {
+      id: "ask-user",
+      label: "ASK_USER_LABEL_CANARY /private/PATH_CANARY RAW_PROMPT_CANARY",
+      kind: "interaction",
+    },
+    state: "waiting",
+    counts: { active: 1, completed: 0, failed: 0 },
+    ...(withProgress ? { progress: { value: 0.5, label: "ASK_USER_PROGRESS_CANARY" } } : {}),
+    attention,
+  };
+}
+
 function fakePi() {
   const hooks = new Map<string, Hook[]>();
   const listeners = new Map<string, EventHandler[]>();
@@ -350,6 +373,122 @@ test("feed lifecycle sends only allowed privacy-minimal fields", async () => {
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("interaction waiting handover is fixed, replay-safe, and removable", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "interaction-handover-session";
+    const key = presenceStatusKey("ask-user", fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 1, "info"));
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} "Pi needs your input"`))
+      && fixture.lines.some((line) => line.startsWith('set_progress 0.50 --label="Pi needs your input"'))
+      && fixture.lines.some((line) => line.includes('"method":"notification.create_for_surface"')));
+    const notificationsAfterInfo = fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"')).length;
+    const flashesAfterInfo = fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length;
+
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 2, "none"));
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)).length === 2);
+
+    let producerReplays = 0;
+    pi.api.events.on("pi-presence:ready:v1", (payload) => {
+      if (typeof payload === "object" && payload !== null && !("consumer" in payload)) {
+        producerReplays += 1;
+        pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 3, "none"));
+      }
+    });
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)).length === 3);
+    expect(producerReplays).toBe(1);
+
+    const ready = pi.emitted.filter((event) => event.name === "pi-presence:ready:v1").map((event) => event.payload);
+    expect(ready).toEqual([
+      { version: 1, sessionId, consumer: { id: "pi-cmux-presence", capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"] } },
+      { version: 1, sessionId },
+      { version: 1, sessionId, consumer: { id: "pi-cmux-presence", capabilities: ["cmux-status", "cmux-progress", "cmux-attention", "presence-remove-v1"] } },
+    ]);
+
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 4, source: { id: "ask-user" } });
+    await waitFor(() => fixture.lines.includes(`clear_status ${key} --tab=${fixture.workspaceId}`));
+    expect(fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"'))).toHaveLength(notificationsAfterInfo);
+    expect(fixture.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(flashesAfterInfo);
+    for (const canary of ["ASK_USER_LABEL_CANARY", "ASK_USER_PROGRESS_CANARY", "/private/PATH_CANARY", "RAW_PROMPT_CANARY"]) {
+      expect(fixture.lines.join("\n")).not.toContain(canary);
+    }
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
+});
+
+test("progress-free interaction info, none, replay, and removal never write or clear progress", async () => {
+  const fixture = await presenceFixture();
+  try {
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "interaction-no-progress-session";
+    const key = presenceStatusKey("ask-user", fixture.surfaceId);
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const progressWritesBefore = fixture.lines.filter((line) => line.startsWith("set_progress ")).length;
+    const progressClearsBefore = fixture.lines.filter((line) => line.startsWith("clear_progress ")).length;
+
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 1, "info", false));
+    await waitFor(() => fixture.lines.some((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)));
+    pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 2, "none", false));
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)).length === 2);
+    pi.api.events.on("pi-presence:ready:v1", (payload) => {
+      if (typeof payload === "object" && payload !== null && !("consumer" in payload)) {
+        pi.emit(PI_PRESENCE_UPDATE_EVENT, askUserUpdate(sessionId, 3, "none", false));
+      }
+    });
+    pi.emit("pi-presence:ready:v1", { version: 1, sessionId });
+    await waitFor(() => fixture.lines.filter((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)).length === 3);
+    pi.emit(PI_PRESENCE_REMOVE_EVENT, { version: 1, sessionId, generation: 1, sequence: 4, source: { id: "ask-user" } });
+    await waitFor(() => fixture.lines.includes(`clear_status ${key} --tab=${fixture.workspaceId}`));
+
+    await pi.lifecycle("session_shutdown");
+    expect(fixture.lines.filter((line) => line.startsWith("set_progress "))).toHaveLength(progressWritesBefore);
+    // Teardown owns one unconditional workspace-progress cleanup; the flow
+    // itself must not add another clear.
+    expect(fixture.lines.filter((line) => line.startsWith("clear_progress "))).toHaveLength(progressClearsBefore + 1);
+  } finally { await fixture.cleanup(); }
+});
+
+test("event-bus interaction near misses use generic text and policy paths", async () => {
+  const fixture = await presenceFixture();
+  try {
+    process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+    process.env.PI_CMUX_PRESENCE_LOG = "true";
+    const pi = fakePi();
+    extension(pi.api as never);
+    const sessionId = "interaction-near-miss-session";
+    await pi.lifecycle("session_start", {}, { sessionManager: { getSessionId: () => sessionId } });
+    const events: PresenceUpdate[] = [
+      { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "interaction-error", label: "Interaction error", kind: "interaction" }, state: "error", counts: { active: 0, completed: 0, failed: 1 }, attention: "error" },
+      { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "interaction-success", label: "Interaction success", kind: "interaction" }, state: "success", counts: { active: 0, completed: 1, failed: 0 }, attention: "success" },
+      { version: 1, sessionId, generation: 1, sequence: 1, source: { id: "ordinary-wait", label: "Ordinary task", kind: "task" }, state: "waiting", counts: { active: 1, completed: 0, failed: 0 }, attention: "info" },
+    ];
+    for (const event of events) pi.emit(PI_PRESENCE_UPDATE_EVENT, event);
+    await waitFor(() => fixture.lines.filter((line) => line.includes('"method":"notification.create_for_surface"')).length === events.length);
+
+    for (const [event, text] of [
+      [events[0], "Interaction error: error · 1 failed"],
+      [events[1], "Interaction success: success · 1 done"],
+      [events[2], "Ordinary task: waiting · 1 active"],
+    ] as const) {
+      expect(fixture.lines).toContain(`set_status ${presenceStatusKey(event.source.id, fixture.surfaceId)} "${text}" --icon=${event.state === "error" ? "x" : event.state === "success" ? "check" : "clock"} --color=${event.state === "error" ? "#dc2626" : event.state === "success" ? "#16a34a" : "#d97706"} --priority=${event.state === "error" ? 40 : 20} --tab=${fixture.workspaceId} --panel=${fixture.surfaceId}`);
+    }
+    const notificationText = fixture.lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as { method: string; params: { title: string; body: string } }).filter((request) => request.method === "notification.create_for_surface").map((request) => request.params);
+    expect(notificationText).toEqual(expect.arrayContaining([
+      { workspace_id: fixture.workspaceId, surface_id: fixture.surfaceId, title: "Interaction error", body: "Interaction error: error · 1 failed" },
+      { workspace_id: fixture.workspaceId, surface_id: fixture.surfaceId, title: "Interaction success", body: "Interaction success: success · 1 done" },
+      { workspace_id: fixture.workspaceId, surface_id: fixture.surfaceId, title: "Ordinary task", body: "Ordinary task: waiting · 1 active" },
+    ]));
+    expect(fixture.lines.join("\n")).not.toContain("Pi needs your input");
+    await pi.lifecycle("session_shutdown");
+  } finally { await fixture.cleanup(); }
 });
 
 test("matching ready replays retained local state with fresh sequence and no attention", async () => {

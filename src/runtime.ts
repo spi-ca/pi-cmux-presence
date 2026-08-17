@@ -29,10 +29,12 @@ import {
   deriveTerminalState,
   formatAttentionTitle,
   formatAutoTitle,
+  formatInteractionWaitingPresentation,
   formatLocalTurnPresentation,
   formatSubagentAttention,
   formatProgressText,
   formatStateText,
+  isInteractionWaiting,
   PRESENCE_STATE_STYLES,
   presenceStatusKey,
   selectProgress,
@@ -622,7 +624,11 @@ export class PresenceRuntime {
     const localPresentation = event.source.id === LOCAL_SOURCE.id
       ? formatLocalTurnPresentation(event.state, this.config.maxLabelChars)
       : null;
-    const label = localPresentation?.sidebar ?? formatStateText(event, this.config.maxLabelChars);
+    const interactionPresentation = localPresentation === null && isInteractionWaiting(event)
+      ? formatInteractionWaitingPresentation(this.config.maxLabelChars)
+      : null;
+    const presentation = localPresentation ?? interactionPresentation;
+    const label = presentation?.sidebar ?? formatStateText(event, this.config.maxLabelChars);
     void this.client?.status(
       this.statusKey(event.source.id),
       label,
@@ -630,7 +636,9 @@ export class PresenceRuntime {
     );
     this.renderProgress();
 
-    if (event.source.id === PI_SUBAGENT_SOURCE_ID) {
+    // An interaction wait is presentation-only and takes precedence over the
+    // exact subagent terminal aggregate, even if a producer reuses that ID.
+    if (event.source.id === PI_SUBAGENT_SOURCE_ID && !interactionPresentation) {
       this.observeSubagentAttention(event);
     } else {
       const level = attentionLevel(event.attention);
@@ -647,8 +655,8 @@ export class PresenceRuntime {
           event.source.id === LOCAL_SOURCE.id ? "local" : "external",
         )) {
           void this.client?.notify(
-            localPresentation?.title ?? formatAttentionTitle(event, this.config.maxLabelChars),
-            localPresentation?.body ?? label,
+            presentation?.title ?? formatAttentionTitle(event, this.config.maxLabelChars),
+            presentation?.body ?? label,
           );
         }
         if (!this.config.suppressNativeFlash && shouldFlashAttention(
@@ -1012,9 +1020,12 @@ export class PresenceRuntime {
       return;
     }
 
+    const interactionPresentation = isInteractionWaiting(next)
+      ? formatInteractionWaitingPresentation(this.config.maxLabelChars)
+      : null;
     void this.client?.progress(
       next.progress!.value,
-      formatProgressText(next, this.config.maxLabelChars),
+      interactionPresentation?.progress ?? formatProgressText(next, this.config.maxLabelChars),
     );
     this.shownProgress = true;
   }

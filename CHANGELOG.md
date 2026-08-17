@@ -7,6 +7,7 @@
 - consumer-side `pi-presence:remove:v1`을 추가해 수락된 외부 source의 retained status를 철회하고, 공유 generation/sequence tombstone fence를 유지한 채 progress와 opt-in meta block을 다시 계산합니다. exact `pi-subagent` remove는 pending terminal 집계를 무효화하고 보류된 local parent attention을 고정 fallback으로 복원합니다.
 - `settled` notification policy를 추가했습니다. 기본값은 계속 `background`이며, settled는 local success/error와 external error를 허용하고 generic external info/success는 억제합니다. 성공 부모 settlement와 exact `pi-subagent` 성공 집계의 병합은 finalized local completion으로 허용합니다.
 - local Pi sidebar/notification을 canonical fixed wording으로 통일하고, terminal sidebar clear와 cmux notification retention의 소유권을 분리했습니다.
+- 정확히 `source.kind: "interaction"`·`state: "waiting"`이고 `attention`이 `"info"`·`"none"`·생략 중 하나인 기존 external V1 update를 consumer-only interaction waiting 표시로 처리합니다. sidebar와 제공된 progress, `info` notification title/body는 producer payload를 복사하지 않는 `Pi needs your input` 고정 문구를 사용합니다. `info`는 기존 attention gate를 따르고 `none`·생략/replay는 status-only이며 `error`·`success`는 generic 처리입니다. 새 protocol/event/ready capability나 producer lifecycle authority를 추가하지 않고 `pi-presence:summary:v1`은 지원하지 않습니다.
 - 실제 post-connect fingerprint가 미해결인 동안 request write 전의 unsolicited data/end/close/error를 hard reject하고 queue를 fail-close합니다. runtime 공유 fingerprint lease gate는 stale lease가 실제 settle할 때까지 session replacement를 포함한 모든 runtime transport의 새 fingerprint를 거부하며 late release를 fence하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 사용합니다. 연결 전 connect error/timeout과 두 fingerprint 완료 뒤의 일반 응답 timeout은 계속 다음 요청을 막지 않습니다. startup resolver도 늦은 epoch 결과를 재사용하지 않고 settle 전에는 새 검증을 시작하지 않습니다.
 - 공식 cmux hook probe를 소켓 해석 전에 `PI_CMUX_PRESENCE_TIMEOUT_MS` 및 session epoch abort로 제한했습니다. timeout·abort·오류와 non-regular 또는 64 KiB 초과 hook source는 official-hook authority를 fail-close하며, 미해결 underlying probe는 하나만 유지하고 늦은 결과가 새 session의 native lifecycle/opt-in integration을 되살리지 못하게 fence합니다.
 
@@ -23,6 +24,7 @@
 - settled policy matrix와 merged finalized-local 예외, precedence, focus polling 부재와 cmux의 focused-banner/notification retention 소유권, canonical local wording·privacy boundary를 문서화합니다.
 - capability negotiation, 공식 hook 우선순위, usage delta 및 다이어그램·릴리스 이력을 문서화합니다.
 - `PI_CMUX_PROFILE=subagent-child-v1`의 exact channel suppression, producer lifecycle 경계, 고정 450ms/100ms terminal window, 공식 hook probe의 64 KiB bounded read·fail-closed authority와 제한된 consumer-side static/fake-socket acceptance 범위를 문서화합니다.
+- interaction waiting의 exact profile, 고정 private 문구, 기존 attention gate와 status-only replay, generic error/success 및 모든 Pi input wait를 주장하지 않는 authority 경계를 문서화합니다.
 
 ## v0.1.0 — 2026-07-25
 

@@ -71,7 +71,11 @@ describe("notification policy", () => {
     expect(shouldNotifyAttention("background", true, "success", "local", true)).toBe(true);
     expect(shouldNotifyAttention("settled", true, "success", "local")).toBe(true);
     expect(shouldNotifyAttention("settled", true, "error", "local")).toBe(true);
+    expect(shouldNotifyAttention("errors", true, "info", "external")).toBe(false);
+    expect(shouldNotifyAttention("background", true, "info", "external")).toBe(true);
+    expect(shouldNotifyAttention("background", true, "info", "local")).toBe(false);
     expect(shouldNotifyAttention("settled", true, "info", "external")).toBe(false);
+    expect(shouldNotifyAttention("all", true, "info", "external")).toBe(true);
     expect(shouldNotifyAttention("settled", true, "success", "external")).toBe(false);
     expect(shouldNotifyAttention("settled", true, "success", "external", true)).toBe(true);
     expect(shouldNotifyAttention("settled", true, "error", "external")).toBe(true);
@@ -84,6 +88,8 @@ describe("notification policy", () => {
     expect(shouldFlashAttention("errors", true, "disabled", "success", "external")).toBe(false);
     expect(shouldFlashAttention("errors", true, "disabled", "error", "local")).toBe(true);
     expect(shouldFlashAttention("attention", true, "all", "success", "external")).toBe(true);
+    expect(shouldFlashAttention("attention", true, "background", "info", "external")).toBe(true);
+    expect(shouldFlashAttention("attention", true, "errors", "info", "external")).toBe(false);
     expect(shouldFlashAttention("attention", true, "errors", "success", "external")).toBe(false);
     expect(shouldFlashAttention("attention", true, "disabled", "error", "external")).toBe(false);
     // Notification capability is independent from configured error flash.

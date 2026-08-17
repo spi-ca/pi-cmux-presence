@@ -46,6 +46,10 @@ payload와 중첩 객체에는 다음 키 외의 키를 넣을 수 없습니다.
 
 가산 count는 기존 필수 count의 의미를 바꾸지 않습니다. 예를 들어 `waiting`은 producer가 대기 중임을 표현할 수 있고, `queued`·`cancelled`·`total`은 상태 문자열·meta 집계에 선택적으로 반영됩니다. consumer는 이 수치들 사이의 산술 관계를 강제하지 않습니다.
 
+`source.kind`는 위 safe text 제약만 있는 기존 문자열 필드이며, 이 계약은 kind enum이나 interaction 전용 DTO를 추가하지 않습니다. 다만 consumer는 정확히 `source.kind: "interaction"`, `state: "waiting"`이고 `attention`이 `"info"`·`"none"`·생략 중 하나인 수락 update에 한해 아래의 고정 interaction-waiting 표시를 적용합니다. 이 조건은 producer가 사용자 입력을 실제로 기다린다는 일반적 인증이나 Pi의 모든 입력 대기 감지가 아니라, producer가 명시한 특정 handover를 표시하는 소비자 측 분기입니다. `attention: "error" | "success"` 또는 다른 state/kind는 일반 외부 update로 남습니다.
+
+이 기능은 기존 `pi-presence:update:v1` payload의 해석만 바꾸며 root key, nested key, event 이름, ready capability를 추가하거나 바꾸지 않습니다. `pi-presence:summary:v1`은 이 consumer가 구독하거나 발행하는 채널이 아니며 의도적으로 지원하지 않습니다.
+
 ## 엄격한 V1 remove 객체
 
 `pi-presence:remove:v1` payload와 `source` 중첩 객체는 아래 키만 정확히 허용합니다. `source.id`와 `sessionId`는 update와 같은 1–96 Unicode code points safe text 규칙(C0/C1 control 및 bidi·방향성 제어 문자 금지)을 따릅니다. plain object가 아니거나 getter/proxy 접근 중 예외가 발생하는 입력은 거부하며 parser는 예외를 외부로 전파하지 않습니다. remove에는 label, kind, state, count, progress, usage 또는 attention처럼 producer가 표시나 attention을 제어할 수 있는 필드가 없습니다.
@@ -84,6 +88,12 @@ consumer는 host가 제공한 session ID도 같은 1–96 Unicode code points sa
 cmux에는 전역 progress 슬롯 하나만 있습니다. `pi-todo`가 progress를 제공하면 state가 terminal이거나 value가 `1`이어도 그 todo가 최우선이며, 다음 todo update 또는 todo가 사라질 때까지 표시합니다. 그 외에는 `running` 또는 `waiting`이고 progress를 제공한 source 중 `source.id` 사전순 첫 항목을 선택합니다. 따라서 결과는 결정적이지만, source별 독립 progress bar는 없습니다.
 
 각 source status는 SHA-256 기반 키로 기록됩니다. `set_status`는 workspace `--tab`과 surface `--panel`을 지정하며, 스타일은 `idle` gray/circle/priority 10, `waiting` amber/clock/20, `running` blue/play/30, `success` green/check/20, `error` red/x/40, `cancelled` gray/minus/20입니다.
+
+### interaction waiting의 고정 표시
+
+위의 정확한 interaction profile은 producer label, progress label, prompt, 선택지, 경로, raw error 등 payload 텍스트를 복사하지 않습니다. status는 `Pi needs your input`이고, 해당 update가 `progress`를 제공해 선택되면 progress label도 같은 고정 문구입니다. `attention: "info"`일 때만 이 고정 문구를 log에 쓰고, notification·flash는 기존 레거시 kill switch, policy, exact V2 capability 및 channel suppression gate를 모두 통과할 때만 요청합니다. `attention: "none"` 또는 생략은 status/progress만 갱신하며 log·notification·flash를 요청하지 않습니다. 따라서 ready replay가 요구하는 `attention: "none"`은 과거 interaction attention을 재발행하지 않습니다.
+
+`attention: "error"` 또는 `"success"`인 interaction-kind update는 고정 문구·privacy 특례가 아닌 generic 상태/label 렌더링과 기존 attention 정책을 사용합니다. 이 consumer는 ask-user producer를 구현하거나 interaction의 실행, 재시도, 취소, 권한 요청을 소유하지 않습니다.
 
 `attention: "info" | "success" | "error"`는 log/notification/flash 요청입니다. V1 `log`는 `PI_CMUX_PRESENCE_LOG`만 충족하면 전송되고, V2 notification·flash는 레거시 kill switch, [`configuration.md`](configuration.md)의 policy 및 해당 V2 capability를 모두 충족할 때만 전송됩니다. `none` 또는 생략은 요청하지 않습니다. policy가 `background`여도 cmux focus나 foreground 여부를 검사하지 않으며, focus 기반 suppress는 지원하지 않습니다. local Pi cancellation과 정확한 `pi-subagent` producer cancellation은 status-only `attention: "none"`이다. 따라서 permissive한 `all` notification 또는 `attention` flash policy여도 notification·flash·attention log를 요청하지 않습니다.
 

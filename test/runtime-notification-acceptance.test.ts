@@ -38,7 +38,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = 150): Promise<void>
   throw new Error("Timed out waiting for fake socket requests.");
 }
 
-async function fixture(methods = ["notification.create_for_surface", "surface.trigger_flash"]) {
+async function fixture(
+  methods = ["notification.create_for_surface", "surface.trigger_flash"],
+  failNotification = false,
+) {
   const workspaceId = "00000000-0000-4000-8000-000000000011";
   const surfaceId = "00000000-0000-4000-8000-000000000012";
   const directory = await fs.mkdtemp(join(os.tmpdir(), "presence-notification-"));
@@ -50,10 +53,10 @@ async function fixture(methods = ["notification.create_for_surface", "surface.tr
     const request = JSON.parse(line) as { id: number; method: string };
     return JSON.stringify({
       id: request.id,
-      ok: request.method !== "notification.create_for_surface" || !line.includes("RPC_FAIL") ? true : false,
+      ok: request.method !== "notification.create_for_surface" || !(failNotification || line.includes("RPC_FAIL")),
       ...(request.method === "system.capabilities"
         ? { result: { protocol: "cmux-socket", version: 2, methods } }
-        : request.method === "notification.create_for_surface" && line.includes("RPC_FAIL")
+        : request.method === "notification.create_for_surface" && (failNotification || line.includes("RPC_FAIL"))
           ? { error: { code: "denied", message: "RPC_FAIL" } }
           : { result: {} }),
     });
@@ -110,6 +113,29 @@ function fakePi() {
     emit(name: string, payload: unknown) {
       for (const handler of listeners.get(name) ?? []) void handler(payload);
     },
+  };
+}
+
+function askUserUpdate(
+  sessionId: string,
+  sequence: number,
+  attention: "info" | "none",
+  withProgress = true,
+): PresenceUpdate {
+  return {
+    version: 1,
+    sessionId,
+    generation: 1,
+    sequence,
+    source: {
+      id: "ask-user",
+      label: "ASK_USER_LABEL_CANARY /private/PATH_CANARY RAW_PROMPT_CANARY",
+      kind: "interaction",
+    },
+    state: "waiting",
+    counts: { active: 1, completed: 0, failed: 0 },
+    ...(withProgress ? { progress: { value: 0.5, label: "ASK_USER_PROGRESS_CANARY" } } : {}),
+    attention,
   };
 }
 
@@ -199,6 +225,107 @@ test("exact pi-subagent ordinary, detached-like, cancellation, and replay fixtur
   } finally {
     await socket.cleanup();
   }
+});
+
+test("interaction waiting uses fixed private socket text, gates info, and never re-notifies none", async () => {
+  const socket = await fixture(["notification.create_for_surface", "surface.trigger_flash"]);
+  try {
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, {
+      ...resolvePresenceConfig(), notificationPolicy: "all", flashPolicy: "attention", log: true,
+    });
+    const sessionId = "interaction-socket-session";
+    const key = presenceStatusKey("ask-user", socket.surfaceId);
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate(askUserUpdate(sessionId, 1, "info"));
+    await waitFor(() => socket.lines.some((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)));
+    await waitFor(() => socket.lines.some((line) => line.startsWith('set_progress 0.50 --label="Pi needs your input"')));
+    await waitFor(() => notifications(socket.lines).length === 1);
+    await waitFor(() => socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length === 1);
+    expect(socket.lines).toContain(`log --level=info --source=pi-cmux-presence --tab=${socket.workspaceId} -- "Pi needs your input"`);
+    expect(notifications(socket.lines).map(({ params }) => ({ title: params.title, body: params.body }))).toEqual([
+      { title: "Pi needs your input", body: "Pi needs your input" },
+    ]);
+
+    runtime.handlePresenceUpdate(askUserUpdate(sessionId, 2, "none"));
+    await waitFor(() => socket.lines.filter((line) => line.startsWith(`set_status ${key} "Pi needs your input"`)).length === 2);
+    await runtime.shutdownSession();
+    expect(notifications(socket.lines)).toHaveLength(1);
+    expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"'))).toHaveLength(1);
+    for (const canary of ["ASK_USER_LABEL_CANARY", "ASK_USER_PROGRESS_CANARY", "/private/PATH_CANARY", "RAW_PROMPT_CANARY"]) {
+      expect(socket.lines.join("\n")).not.toContain(canary);
+    }
+  } finally {
+    await socket.cleanup();
+  }
+
+});
+
+test("interaction waiting takes precedence over the exact subagent terminal aggregate", async () => {
+  const socket = await fixture(["notification.create_for_surface"]);
+  try {
+    const pi = fakePi();
+    const runtime = new PresenceRuntime(pi.api as never, {
+      ...resolvePresenceConfig(), notificationPolicy: "all",
+    });
+    const sessionId = "subagent-interaction-session";
+    await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+    runtime.handlePresenceUpdate({
+      ...askUserUpdate(sessionId, 1, "info"),
+      source: { id: "pi-subagent", label: "SUBAGENT_INTERACTION_CANARY", kind: "interaction" },
+    });
+    await waitFor(() => notifications(socket.lines).length === 1);
+    expect(notifications(socket.lines)[0]?.params).toMatchObject({
+      title: "Pi needs your input",
+      body: "Pi needs your input",
+    });
+    expect(socket.lines.join("\n")).not.toContain("SUBAGENT_INTERACTION_CANARY");
+    await runtime.shutdownSession();
+  } finally {
+    await socket.cleanup();
+  }
+});
+
+test("interaction info follows notification and flash policies with independent capabilities", async () => {
+  const observe = async (
+    notificationPolicy: "errors" | "background" | "settled" | "all" | "disabled",
+    flashPolicy: "errors" | "attention" | "disabled",
+    methods: string[],
+    expected: { notification: boolean; flash: boolean },
+  ) => {
+    const socket = await fixture(methods);
+    try {
+      const pi = fakePi();
+      const runtime = new PresenceRuntime(pi.api as never, {
+        ...resolvePresenceConfig(), notificationPolicy, flashPolicy,
+      });
+      const sessionId = `interaction-policy-${notificationPolicy}-${flashPolicy}-${methods.join("-")}`;
+      await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
+      runtime.handlePresenceUpdate(askUserUpdate(sessionId, 1, "info"));
+      await waitFor(() => socket.lines.some((line) => line.startsWith("set_status ")));
+      if (expected.notification) await waitFor(() => notifications(socket.lines).length === 1);
+      if (expected.flash) await waitFor(() => socket.lines.some((line) => line.includes('"method":"surface.trigger_flash"')));
+      // Shutdown awaits the owned client's serial queue, so absence checks cannot
+      // race a later queued notification or flash request.
+      await runtime.shutdownSession();
+      expect(notifications(socket.lines).length).toBe(expected.notification ? 1 : 0);
+      expect(socket.lines.filter((line) => line.includes('"method":"surface.trigger_flash"')).length).toBe(expected.flash ? 1 : 0);
+    } finally {
+      await socket.cleanup();
+    }
+  };
+
+  for (const [policy, allowed] of [
+    ["background", true], ["all", true], ["errors", false], ["settled", false], ["disabled", false],
+  ] as const) {
+    await observe(policy, "disabled", ["notification.create_for_surface", "surface.trigger_flash"], { notification: allowed, flash: false });
+  }
+  // The default `errors` flash behavior does not treat info as attention;
+  // opting into `attention` does.
+  await observe("all", "errors", ["notification.create_for_surface", "surface.trigger_flash"], { notification: true, flash: false });
+  await observe("all", "attention", ["notification.create_for_surface", "surface.trigger_flash"], { notification: true, flash: true });
+  await observe("all", "attention", ["notification.create_for_surface"], { notification: true, flash: false });
+  await observe("all", "attention", ["surface.trigger_flash"], { notification: false, flash: true });
 });
 
 test("three successful child deltas form one count-aware burst; cancellations stay out and a later burst is fresh", async () => {
@@ -836,28 +963,23 @@ test("aggregate notifications exclude producer and payload canaries; invalid raw
   }
 });
 
-test("notification RPC failure has no unhandled rejection and does not block status or teardown", async () => {
-  const socket = await fixture(["notification.create_for_surface"]);
+test("interaction notification RPC failure remains best-effort without blocking status or teardown", async () => {
+  const socket = await fixture(["notification.create_for_surface"], true);
   const unhandled: unknown[] = [];
   const listener = (reason: unknown) => { unhandled.push(reason); };
   process.on("unhandledRejection", listener);
   try {
     const pi = fakePi();
     const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig());
-    const sessionId = "RPC_FAIL";
+    const sessionId = "interaction-rpc-failure";
     await runtime.startSession({ sessionManager: { getSessionId: () => sessionId } });
-    runtime.handlePresenceUpdate({
-      ...producerUpdate(sessionId, 1),
-      source: { id: "external-rpc-failure", label: "RPC_FAIL", kind: "task" },
-      state: "error",
-      attention: "error",
-    });
+    runtime.handlePresenceUpdate(askUserUpdate(sessionId, 1, "info"));
     await waitFor(() => socket.lines.some((line) => line.startsWith("set_status "))
       && socket.lines.some((line) => line.includes('"method":"notification.create_for_surface"')));
     await runtime.shutdownSession();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(unhandled).toEqual([]);
-    expect(socket.lines).toContain(`clear_status ${presenceStatusKey("external-rpc-failure", socket.surfaceId)} --tab=${socket.workspaceId}`);
+    expect(socket.lines).toContain(`clear_status ${presenceStatusKey("ask-user", socket.surfaceId)} --tab=${socket.workspaceId}`);
   } finally {
     process.off("unhandledRejection", listener);
     await socket.cleanup();
