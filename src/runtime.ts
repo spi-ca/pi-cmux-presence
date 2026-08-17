@@ -254,17 +254,15 @@ export class PresenceRuntime {
         new UnixSocketTransport(socketPath, this.config.timeoutMs, this.config.maxQueue),
         this.config,
       );
-      await created.initialize();
-      if (!this.isCurrent(epoch, nextSessionId)) {
-        await created.close();
-        return;
-      }
-      await created.initializeOwnedProgress();
-      if (!this.isCurrent(epoch, nextSessionId)) {
-        await created.close();
-        return;
-      }
+      // Publish ownership before either asynchronous initialization step. A
+      // replacement or shutdown can then detach this client and serialize its
+      // close through the existing bounded teardown barrier.
       this.client = created;
+      await created.initialize();
+      if (!this.isCurrent(epoch, nextSessionId)) return;
+      // This runs only after the client is the current runtime owner.
+      await created.initializeOwnedProgress();
+      if (!this.isCurrent(epoch, nextSessionId)) return;
     }
 
     await this.initializeOptionalIntegrations(nextSessionId);

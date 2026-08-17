@@ -72,7 +72,7 @@ bun run diagram:render
 - 유효한 `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`와 안전한 소켓이 없으면 대상·포커스를 추측하지 않습니다.
 - V2 선택 메서드는 `system.capabilities`가 광고한 정확한 메서드만 호출합니다. V1 응답은 정확히 `OK`여야 합니다.
 - observer 오류와 잘못된 host session ID는 Pi 작업 실패가 아니라 해당 presence 비활성화 또는 출력 유실로 끝나야 합니다.
-- progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다.
+- progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다; owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 state를 추가하면 style·priority와 event validator를 함께 갱신합니다.
 - `pi`와 `pi-todo`는 예약 source입니다. generic update/remove/ready contract와 count 확장은 [event-contract.md](event-contract.md)의 strict validator를 먼저 갱신해야 합니다. startup은 frozen advertisement 뒤 frozen consumer-less request 하나를 내며, ready에서 `consumer` 생략은 matching active consumer의 advertisement 하나와 local/todo replay 한 번을 요청합니다. consumer-bearing advertisement는 response나 replay를 유발하지 않아야 하며 nested request도 증폭해서는 안 됩니다. 이 load-order 보정은 socket·process·lifecycle authority를 만들지 않습니다. update/remove는 같은 source fence를 공유하고 remove 뒤 tombstone을 유지해야 합니다. `pi-subagent`는 예약은 아니지만 exact source ID의 attention과 remove invalidation에만 cumulative terminal policy가 적용되므로 label/kind 기반 special case를 추가하지 않습니다.
