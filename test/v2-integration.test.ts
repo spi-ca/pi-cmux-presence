@@ -52,20 +52,47 @@ test("forged and replayed handles cannot accept an otherwise valid payload", () 
 });
 
 test("terminal delivery is live-only and not retained for a replacement consumer", () => {
+  const activeConsumers = new Set<NonNullable<ReturnType<typeof createPresenceConsumer>>>();
+  const accepted = new Map<NonNullable<ReturnType<typeof createPresenceConsumer>>, unknown[]>();
+  const activate = (consumer: NonNullable<ReturnType<typeof createPresenceConsumer>>) => {
+    // Registration must precede activation so synchronous state replay can use
+    // the same fanout path; failed activation is not left observable.
+    activeConsumers.add(consumer);
+    const activated = consumer.activate();
+    if (!activated) activeConsumers.delete(consumer);
+    return activated;
+  };
+  const deactivate = (consumer: NonNullable<ReturnType<typeof createPresenceConsumer>>) => {
+    activeConsumers.delete(consumer);
+    return consumer.deactivate();
+  };
   const first = createPresenceConsumer({ id: "pi-cmux-presence" })!;
-  let terminals = 0;
-  first.activate();
+  accepted.set(first, []);
+  expect(activate(first)).toBe(true);
   const producer = createPresenceProducer({ source: "subagent", emit: (name: string, payload: unknown) => {
-    if (first.accept(name, payload)) terminals += 1;
+    for (const consumer of activeConsumers) {
+      const event = consumer.accept(name, payload);
+      if (event) accepted.get(consumer)!.push(event);
+    }
   } })!;
-  producer.activate();
+  expect(producer.activate()).toBe(true);
   expect(producer.publishTerminal({ version: 2, generation: 0, sequence: 0, source: "subagent", eventId: 0, outcome: "completed" })).toBe(true);
-  expect(terminals).toBe(1);
-  first.deactivate();
+  expect(accepted.get(first)).toHaveLength(1);
+
+  expect(deactivate(first)).toBe(true);
   const replacement = createPresenceConsumer({ id: "pi-cmux-presence" })!;
-  expect(replacement.activate()).toBe(true);
-  expect(terminals).toBe(1);
-  producer.deactivate(); replacement.deactivate();
+  accepted.set(replacement, []);
+  expect(activate(replacement)).toBe(true);
+  // The first terminal was live-only: activating after it cannot observe it.
+  expect(accepted.get(replacement)).toEqual([]);
+
+  // A later live terminal must be routed to the replacement, rather than
+  // silently being observed only through the original consumer's closure.
+  expect(producer.publishTerminal({ version: 2, generation: 0, sequence: 1, source: "subagent", eventId: 1, outcome: "completed" })).toBe(true);
+  expect(accepted.get(first)).toHaveLength(1);
+  expect(accepted.get(replacement)).toHaveLength(1);
+  expect(accepted.get(replacement)?.[0]).toMatchObject({ eventId: 1, sessionEpoch: replacement.ready.sessionEpoch });
+  producer.deactivate(); deactivate(replacement);
 });
 
 test("withdrawal fences same-generation state until a fresh generation", () => {
