@@ -1,7 +1,7 @@
 import type { PresenceUpdate } from "./events.js";
 
 /** Exact producer identity; labels and kinds are descriptive, never routing authority. */
-export const PI_SUBAGENT_SOURCE_ID = "pi-subagent";
+export const PI_SUBAGENT_SOURCE_ID = "subagent";
 
 export type NotificationPolicy = "errors" | "background" | "settled" | "all" | "disabled";
 export type FlashPolicy = "errors" | "attention" | "disabled";
@@ -37,61 +37,41 @@ function baselineFor(event: PresenceUpdate): SubagentTerminalBaseline {
   };
 }
 
-function terminalFor(attention: PresenceUpdate["attention"]): AttentionKind | null {
-  if (attention === "error") return "error";
-  return attention === "success" || attention === "info" ? "success" : null;
-}
-
 /**
- * Interpret pi-subagent's cumulative counters. Only the exact source is
- * eligible, and cancellation is never an attention signal. A non-none first
- * update can still be a live terminal, but intentionally carries no history.
+ * V2 state snapshots establish only the subagent cumulative baseline. Terminal
+ * attention is represented exclusively by V2 terminal events: state counter
+ * changes and state attention must never be converted into completion edges.
  */
 export function observeSubagentTerminal(
   previous: SubagentTerminalBaseline | null,
   event: PresenceUpdate,
 ): SubagentObservation {
   const baseline = baselineFor(event);
-  const noAttention = event.state === "cancelled" ? null : terminalFor(event.attention);
   if (event.source.id !== PI_SUBAGENT_SOURCE_ID) {
     return { baseline, terminal: null, completedDelta: 0, failedDelta: 0, reset: false, generationChanged: false, unknownCount: false };
   }
 
   if (previous === null || previous.generation !== event.generation) {
-    // A replay with none only establishes its baseline. A non-none first event
-    // may be live, so preserve a generic (unknown-count) signal without
-    // treating its cumulative totals as new work.
     return {
       baseline,
-      terminal: noAttention,
+      terminal: null,
       completedDelta: 0,
       failedDelta: 0,
       reset: false,
       generationChanged: previous !== null,
-      unknownCount: noAttention !== null,
+      unknownCount: false,
     };
   }
 
-  const completedDelta = event.counts.completed - previous.completed;
-  const failedDelta = event.counts.failed - previous.failed;
-  const cancelledDelta = (event.counts.cancelled ?? 0) - previous.cancelled;
-  if (completedDelta < 0 || failedDelta < 0 || cancelledDelta < 0) {
-    return { baseline, terminal: null, completedDelta: 0, failedDelta: 0, reset: true, generationChanged: false, unknownCount: false };
-  }
-
-  if (noAttention === null) {
-    return { baseline, terminal: null, completedDelta: 0, failedDelta: 0, reset: false, generationChanged: false, unknownCount: false };
-  }
-
-  const terminal = noAttention === "error"
-    ? failedDelta > 0 ? "error" : null
-    : completedDelta > 0 ? "success" : null;
+  const reset = event.counts.completed < previous.completed
+    || event.counts.failed < previous.failed
+    || (event.counts.cancelled ?? 0) < previous.cancelled;
   return {
     baseline,
-    terminal,
-    completedDelta: terminal === null ? 0 : completedDelta,
-    failedDelta: terminal === null ? 0 : failedDelta,
-    reset: false,
+    terminal: null,
+    completedDelta: 0,
+    failedDelta: 0,
+    reset,
     generationChanged: false,
     unknownCount: false,
   };

@@ -12,11 +12,9 @@ import {
 
 function event(overrides: Partial<PresenceUpdate> = {}): PresenceUpdate {
   return {
-    version: 1,
-    sessionId: "session-1",
     generation: 1,
     sequence: 1,
-    source: { id: "pi-subagent", label: "Untrusted descriptive label", kind: "agent-group" },
+    source: { id: "subagent", label: "Untrusted descriptive label", kind: "agent-group" },
     state: "success",
     counts: { active: 0, completed: 0, failed: 0 },
     attention: "none",
@@ -25,21 +23,21 @@ function event(overrides: Partial<PresenceUpdate> = {}): PresenceUpdate {
 }
 
 describe("notification policy", () => {
-  test("calculates deltas, preserves success through a following error, and ignores no-delta/cancelled updates", () => {
+  test("updates cumulative baselines without inferring V2 terminal edges from state counts", () => {
     const first = observeSubagentTerminal(null, event({ attention: "none" }));
     const success = observeSubagentTerminal(first.baseline, event({ sequence: 2, counts: { active: 0, completed: 2, failed: 0 }, attention: "success" }));
-    expect(success).toMatchObject({ terminal: "success", completedDelta: 2, failedDelta: 0 });
+    expect(success).toMatchObject({ terminal: null, completedDelta: 0, failedDelta: 0 });
+    expect(success.baseline).toMatchObject({ completed: 2, failed: 0 });
     const error = observeSubagentTerminal(success.baseline, event({ sequence: 3, state: "error", counts: { active: 0, completed: 3, failed: 1 }, attention: "error" }));
-    expect(error).toMatchObject({ terminal: "error", completedDelta: 1, failedDelta: 1 });
-    const noDelta = observeSubagentTerminal(error.baseline, event({ sequence: 4, state: "error", counts: { active: 0, completed: 3, failed: 1 }, attention: "error" }));
-    expect(noDelta.terminal).toBeNull();
-    const cancelled = observeSubagentTerminal(noDelta.baseline, event({ sequence: 5, state: "cancelled", counts: { active: 0, completed: 3, failed: 1, cancelled: 1 }, attention: "error" }));
-    expect(cancelled.terminal).toBeNull();
+    expect(error).toMatchObject({ terminal: null, completedDelta: 0, failedDelta: 0 });
+    expect(error.baseline).toMatchObject({ completed: 3, failed: 1 });
+    const cancelled = observeSubagentTerminal(error.baseline, event({ sequence: 4, state: "cancelled", counts: { active: 0, completed: 3, failed: 1, cancelled: 1 }, attention: "error" }));
+    expect(cancelled).toMatchObject({ terminal: null, completedDelta: 0, failedDelta: 0 });
   });
 
-  test("resets safely on decreases and treats first non-none attention as unknown rather than history", () => {
+  test("baseline-only state observation still detects count resets and generation changes", () => {
     const first = observeSubagentTerminal(null, event({ counts: { active: 0, completed: 9, failed: 4 }, attention: "error" }));
-    expect(first).toMatchObject({ terminal: "error", unknownCount: true, completedDelta: 0, failedDelta: 0 });
+    expect(first).toMatchObject({ terminal: null, unknownCount: false, completedDelta: 0, failedDelta: 0 });
     const decreased = observeSubagentTerminal(first.baseline, event({ sequence: 2, counts: { active: 0, completed: 1, failed: 0 }, attention: "error" }));
     expect(decreased).toMatchObject({ terminal: null, reset: true });
     const generation = observeSubagentTerminal(decreased.baseline, event({ generation: 2, sequence: 1, counts: { active: 0, completed: 9, failed: 9 }, attention: "none" }));

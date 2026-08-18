@@ -46,7 +46,7 @@ function owner(tools: unknown): string | null {
 /** Parse the installed RPIV TaskDetails envelope without ever copying task text. */
 export class TodoProgressAdapter {
   private owner: string | null = null;
-  accept(event: unknown, tools: unknown, sessionId: string, generation: number, sequence: number): PresenceUpdate | null {
+  accept(event: unknown, tools: unknown, generation: number, sequence: number): PresenceUpdate | null {
     try {
       if (!isPlainObject(event) || event.toolName !== "todo" || event.isError !== false) return null;
       const currentOwner = owner(tools);
@@ -68,8 +68,8 @@ export class TodoProgressAdapter {
       }
       this.owner = currentOwner;
       return {
-        version: 1, sessionId, generation, sequence,
-        source: { id: "pi-todo", label: "Pi todo", kind: "todo" },
+        generation, sequence,
+        source: { id: "todo", label: "Pi todo", kind: "todo" },
         state: active > 0 ? "running" : visible === 0 ? "idle" : completed === visible ? "success" : "waiting",
         counts: { active, completed, failed: 0, queued, cancelled: 0, total: visible },
         ...(visible > 0 ? { progress: { value: completed / visible } } : {}),

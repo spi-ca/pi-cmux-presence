@@ -16,8 +16,6 @@ import { CMUX_TEXT_BYTES } from "../src/protocol.js";
 import { boundedPresenceText, normalizePresenceText } from "../src/text.js";
 
 const event = (label: string, progressLabel = label): PresenceUpdate => ({
-  version: 1,
-  sessionId: "session-1",
   generation: 1,
   sequence: 1,
   source: { id: "worker", label, kind: "task" },
@@ -63,8 +61,10 @@ describe("UTF-8 bounded presence text", () => {
     for (const [value, maxBytes] of rendered) {
       expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(maxBytes);
       expect(value).not.toContain("�");
-      expect(value.endsWith("…")).toBe(true);
     }
+    expect(rendered[0][0].endsWith("…")).toBe(true);
+    expect(rendered[1][0]).toBe("worker");
+    expect(rendered[2][0].endsWith("…")).toBe(true);
     expect(rendered[3][0].startsWith("Pi · ")).toBe(true);
     expect([...formatAttentionTitle(event("a".repeat(200)), 96)]).toHaveLength(96);
     expect([...formatAutoTitle("a".repeat(200), 80)]).toHaveLength(80);
@@ -142,11 +142,15 @@ describe("UTF-8 bounded presence text", () => {
     expect(Buffer.byteLength(formatStateText({ ...ordinaryTask, source: { ...ordinaryTask.source, label: "😀".repeat(120) } }, 96), "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.v1Text);
   });
 
+  test("renders V2 numeric progress without producer text", () => {
+    expect(formatProgressText({ ...event("producer-canary"), progress: { value: 3 / 5, completed: 3, total: 5 } }, 96)).toBe("Source 3/5");
+  });
+
   test("selects todo progress before other eligible progress", () => {
     const worker = event("Worker");
     const todo: PresenceUpdate = {
       ...event("Pi todo"),
-      source: { id: "pi-todo", label: "Pi todo", kind: "todo" },
+      source: { id: "todo", label: "Pi todo", kind: "todo" },
       state: "success",
       progress: { value: 1 },
     };

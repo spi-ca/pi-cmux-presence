@@ -1,283 +1,101 @@
-import { isProxy } from "node:util/types";
-import { hasControlOrBidi, isPlainObject } from "./validation.js";
+import type { PresenceEventV2, PresenceStateV2, PresenceTerminalV2 } from "@pi/presence";
 
-export const PI_PRESENCE_UPDATE_EVENT = "pi-presence:update:v1" as const;
-export const PI_PRESENCE_REMOVE_EVENT = "pi-presence:remove:v1" as const;
-export const PI_PRESENCE_READY_EVENT = "pi-presence:ready:v1" as const;
-const MAX_TEXT = 96;
-const MAX_SOURCES = 64;
-/** Each count is a safe integer in the inclusive range 0..1,000,000. */
-export const MAX_COUNT = 1_000_000;
-const STATES = new Set(["idle", "waiting", "running", "success", "error", "cancelled"]);
-const ATTENTION = new Set(["none", "info", "success", "error"]);
-const ROOT_KEYS = ["version", "sessionId", "generation", "sequence", "source", "state", "counts", "progress", "usage", "attention"];
-const REMOVE_ROOT_KEYS = ["version", "sessionId", "generation", "sequence", "source"];
-const READY_KEYS = ["version", "sessionId", "consumer"];
-const CONSUMER_KEYS = ["id", "capabilities"];
-const SOURCE_KEYS = ["id", "label", "kind"];
-const REMOVE_SOURCE_KEYS = ["id"];
-const COUNT_KEYS = ["active", "completed", "failed", "queued", "cancelled", "total"]; 
-const REQUIRED_COUNT_KEYS = ["active", "completed", "failed"]; 
-const PROGRESS_KEYS = ["value", "label"];
-const USAGE_KEYS = ["tokens", "cost", "contextPercent"];
+export const LOCAL_SOURCE = { id: "pi", label: "Pi", kind: "agent" } as const;
+export const TODO_SOURCE = { id: "todo", label: "Pi todo", kind: "todo" } as const;
+export const SUBAGENT_SOURCE = { id: "subagent", label: "Subagents", kind: "agent-group" } as const;
+export const INTERACTION_SOURCE = { id: "interaction", label: "Input", kind: "interaction" } as const;
 
 export interface PresenceUsage { tokens?: number; cost?: number; contextPercent?: number; }
 export interface PresenceUpdate {
-  version: 1;
-  sessionId: string;
   generation: number;
   sequence: number;
   source: { id: string; label: string; kind: string };
   state: "idle" | "waiting" | "running" | "success" | "error" | "cancelled";
-  counts: { active: number; completed: number; failed: number; queued?: number; cancelled?: number; total?: number }; 
-  progress?: { value: number; label?: string };
+  counts: { active: number; completed: number; failed: number; queued?: number; cancelled?: number; total?: number };
+  progress?: { value: number; completed?: number; total?: number; label?: string };
   usage?: PresenceUsage;
   attention?: "none" | "info" | "success" | "error";
+  /** Structured V2 cause retained only for local attention routing. */
+  attentionReason?: "failure" | "blocked" | "input_required";
 }
 
-/** A producer withdrawal retains only its ordering fence, never its display state. */
-export interface PresenceRemove {
-  version: 1;
-  sessionId: string;
-  generation: number;
-  sequence: number;
-  source: { id: string };
-}
-
-export interface PresenceRemoveResult {
-  readonly accepted: boolean;
-  /** The exact retained update that was withdrawn, if one still existed. */
-  readonly removed?: PresenceUpdate;
-}
-
-function hasOwn(value: Record<string, unknown>, key: string): boolean { return Object.hasOwn(value, key); }
-
-/**
- * Copies only own data properties after checking the complete key set. Ready
- * payloads are process-local but untrusted: this avoids getter/proxy races and
- * makes every later validation read a stable snapshot.
- */
-function snapshotOwnDataFields(
-  value: unknown,
-  allowed: readonly string[],
-  required: readonly string[],
-): Record<string, unknown> | null {
-  if (isProxy(value) || !isPlainObject(value)) return null;
-  const keys = Reflect.ownKeys(value);
-  if (!keys.every((key) => typeof key === "string" && allowed.includes(key))
-    || !required.every((key) => keys.includes(key))) return null;
-  const snapshot: Record<string, unknown> = {};
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !("value" in descriptor)) return null;
-    snapshot[key as string] = descriptor.value;
-  }
-  return snapshot;
-}
-
-/** Copy a dense, bounded capability list without reading indexed accessors. */
-function snapshotCapabilities(value: unknown): string[] | null {
-  // Array.isArray(proxy) is true, so reject before any reflective operation.
-  if (isProxy(value) || !Array.isArray(value)) return null;
-  const keys = Reflect.ownKeys(value);
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-  if (!lengthDescriptor || !("value" in lengthDescriptor)
-    || typeof lengthDescriptor.value !== "number"
-    || !Number.isSafeInteger(lengthDescriptor.value)
-    || lengthDescriptor.value < 0
-    || lengthDescriptor.value > 16) return null;
-  const length = lengthDescriptor.value;
-  if (keys.length !== length + 1
-    || !keys.every((key) => key === "length"
-      || (typeof key === "string"
-        && /^(?:0|[1-9]\d*)$/.test(key)
-        && Number(key) < length))) return null;
-  const capabilities: string[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (!descriptor || !("value" in descriptor) || !safeText(descriptor.value)) return null;
-    capabilities.push(descriptor.value);
-  }
-  return capabilities;
-}
-// Directional formatting marks can make a benign-looking target render differently.
-function safeText(value: unknown): value is string {
-  return typeof value === "string"
-    && value.length > 0
-    && value.length <= MAX_TEXT * 2
-    && [...value].length <= MAX_TEXT
-    && !hasControlOrBidi(value);
-}
-
-/** Validate the host session fence before any presence side effects are created. */
-export function parsePresenceSessionId(value: unknown): string | null {
-  return safeText(value) ? value : null;
-}
-
-function sequence(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 1; }
-function generation(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
-function count(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_COUNT; }
-function metric(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1_000_000_000_000; }
-function percent(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100; }
-
-/**
- * Parse untrusted process-local event data into an owned DTO. This is total:
- * proxies and throwing accessors are rejected rather than escaping to Pi.
- */
-export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
-  try {
-    const root = snapshotOwnDataFields(value, ROOT_KEYS, ["version", "sessionId", "generation", "sequence", "source", "state", "counts"]);
-    if (!root) return null;
-    const version = root.version;
-    const sessionId = root.sessionId;
-    const eventGeneration = root.generation;
-    const eventSequence = root.sequence;
-    const rawSource = snapshotOwnDataFields(root.source, SOURCE_KEYS, SOURCE_KEYS);
-    const state = root.state;
-    const rawCounts = snapshotOwnDataFields(root.counts, COUNT_KEYS, REQUIRED_COUNT_KEYS);
-    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !rawSource || !rawCounts) return null;
-    const sourceId = rawSource.id;
-    const sourceLabel = rawSource.label;
-    const sourceKind = rawSource.kind;
-    const active = rawCounts.active;
-    const completed = rawCounts.completed;
-    const failed = rawCounts.failed;
-    const queued = rawCounts.queued;
-    const cancelled = rawCounts.cancelled;
-    const total = rawCounts.total;
-    if (!safeText(sourceId) || !safeText(sourceLabel) || !safeText(sourceKind) || typeof state !== "string" || !STATES.has(state) || !count(active) || !count(completed) || !count(failed) || (queued !== undefined && !count(queued)) || (cancelled !== undefined && !count(cancelled)) || (total !== undefined && !count(total))) return null;
-
-    let progress: PresenceUpdate["progress"];
-    if (root.progress !== undefined) {
-      const rawProgress = snapshotOwnDataFields(root.progress, PROGRESS_KEYS, ["value"]);
-      if (!rawProgress) return null;
-      const progressValue = rawProgress.value;
-      const progressLabel = rawProgress.label;
-      if (!metric(progressValue) || progressValue > 1 || (progressLabel !== undefined && !safeText(progressLabel))) return null;
-      progress = progressLabel === undefined ? { value: progressValue } : { value: progressValue, label: progressLabel };
-    }
-
-    let usage: PresenceUsage | undefined;
-    if (root.usage !== undefined) {
-      const rawUsage = snapshotOwnDataFields(root.usage, USAGE_KEYS, []);
-      if (!rawUsage) return null;
-      const tokens = rawUsage.tokens;
-      const cost = rawUsage.cost;
-      const contextPercent = rawUsage.contextPercent;
-      if ((tokens !== undefined && !metric(tokens)) || (cost !== undefined && !metric(cost)) || (contextPercent !== undefined && !percent(contextPercent))) return null;
-      usage = {
-        ...(tokens === undefined ? {} : { tokens }),
-        ...(cost === undefined ? {} : { cost }),
-        ...(contextPercent === undefined ? {} : { contextPercent }),
-      };
-    }
-
-    const attention = root.attention;
-    if (attention !== undefined && (typeof attention !== "string" || !ATTENTION.has(attention))) return null;
-    return {
-      version: 1, sessionId, generation: eventGeneration, sequence: eventSequence,
-      source: { id: sourceId, label: sourceLabel, kind: sourceKind },
-      state: state as PresenceUpdate["state"],
-      counts: { active, completed, failed, ...(queued === undefined ? {} : { queued }), ...(cancelled === undefined ? {} : { cancelled }), ...(total === undefined ? {} : { total }) },
-      ...(progress === undefined ? {} : { progress }),
-      ...(usage === undefined ? {} : { usage }),
-      ...(attention === undefined ? {} : { attention: attention as PresenceUpdate["attention"] }),
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** Parse a withdrawal envelope without permitting producer-controlled display data. */
-export function parsePresenceRemove(value: unknown): PresenceRemove | null {
-  try {
-    const root = snapshotOwnDataFields(value, REMOVE_ROOT_KEYS, REMOVE_ROOT_KEYS);
-    if (!root) return null;
-    const version = root.version;
-    const sessionId = root.sessionId;
-    const eventGeneration = root.generation;
-    const eventSequence = root.sequence;
-    const rawSource = snapshotOwnDataFields(root.source, REMOVE_SOURCE_KEYS, REMOVE_SOURCE_KEYS);
-    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !rawSource) return null;
-    const sourceId = rawSource.id;
-    if (!safeText(sourceId)) return null;
-    return {
-      version: 1,
-      sessionId,
-      generation: eventGeneration,
-      sequence: eventSequence,
-      source: { id: sourceId },
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** A ready event grants no authority: no consumer is a discovery/replay request, while a consumer is a passive advertisement. */
-export interface PresenceReady { version: 1; sessionId: string; consumer?: { id: string; capabilities: string[] }; }
-export function parsePresenceReady(value: unknown): PresenceReady | null {
-  try {
-    const root = snapshotOwnDataFields(value, READY_KEYS, ["version", "sessionId"]);
-    if (!root || root.version !== 1 || !safeText(root.sessionId)) return null;
-    if (!hasOwn(root, "consumer")) return { version: 1, sessionId: root.sessionId };
-
-    const consumer = snapshotOwnDataFields(root.consumer, CONSUMER_KEYS, CONSUMER_KEYS);
-    if (!consumer || !safeText(consumer.id)) return null;
-    const capabilities = snapshotCapabilities(consumer.capabilities);
-    if (!capabilities) return null;
-    return { version: 1, sessionId: root.sessionId, consumer: { id: consumer.id, capabilities } };
-  } catch { return null; }
-}
-
-interface SourceFence { generation: number; sequence: number; }
-
-/**
- * A source owns its generation: a newer source generation resets only that
- * source's sequence fence. Session ownership remains with the consumer.
- */
-export class PresenceEventRegistry {
-  private sessionId: string | null = null;
-  private readonly fenceBySource = new Map<string, SourceFence>();
+/** Local presentation state only. V2 validation, epoch routing, and fences stay in @pi/presence. */
+export class PresenceStateRegistry {
   private readonly values = new Map<string, PresenceUpdate>();
-
-  start(sessionId: string): void {
-    if (parsePresenceSessionId(sessionId) === null) throw new Error("Invalid presence session fence.");
-    this.sessionId = sessionId;
-    this.fenceBySource.clear();
-    this.values.clear();
-  }
-  stop(): void { this.sessionId = null; this.fenceBySource.clear(); this.values.clear(); }
-  accept(candidate: unknown): boolean {
-    const event = parsePresenceUpdate(candidate);
-    return event !== null && this.acceptParsed(event);
-  }
-  acceptParsed(event: PresenceUpdate): boolean {
-    if (event.sessionId !== this.sessionId) return false;
-    const previous = this.fenceBySource.get(event.source.id);
-    if (!previous && this.fenceBySource.size >= MAX_SOURCES) return false;
-    if (previous && (event.generation < previous.generation || (event.generation === previous.generation && event.sequence <= previous.sequence))) return false;
-    this.fenceBySource.set(event.source.id, { generation: event.generation, sequence: event.sequence });
-    this.values.set(event.source.id, event);
-    return true;
-  }
-  acceptRemove(candidate: unknown): PresenceRemoveResult {
-    const event = parsePresenceRemove(candidate);
-    return event === null ? { accepted: false } : this.acceptParsedRemove(event);
-  }
-  acceptParsedRemove(event: PresenceRemove): PresenceRemoveResult {
-    if (event.sessionId !== this.sessionId
-      || event.source.id === "pi"
-      || event.source.id === "pi-todo") return { accepted: false };
-    const previous = this.fenceBySource.get(event.source.id);
-    if (!previous
-      || event.generation < previous.generation
-      || (event.generation === previous.generation && event.sequence <= previous.sequence)) {
-      return { accepted: false };
-    }
-    const removed = this.values.get(event.source.id);
-    this.fenceBySource.set(event.source.id, { generation: event.generation, sequence: event.sequence });
-    this.values.delete(event.source.id);
-    return { accepted: true, ...(removed ? { removed } : {}) };
+  clear(): void { this.values.clear(); }
+  set(event: PresenceUpdate): void { this.values.set(event.source.id, event); }
+  remove(sourceId: string): PresenceUpdate | undefined {
+    const removed = this.values.get(sourceId);
+    this.values.delete(sourceId);
+    return removed;
   }
   snapshot(): PresenceUpdate[] { return [...this.values.values()].sort((left, right) => left.source.label.localeCompare(right.source.label)); }
 }
+
+function attention(event: PresenceStateV2): PresenceUpdate["attention"] {
+  if (event.attention?.occurrence !== "new") return "none";
+  return event.attention.reason === "failure" || event.attention.reason === "blocked" ? "error" : "info";
+}
+
+function attentionReason(event: PresenceStateV2): PresenceUpdate["attentionReason"] {
+  if (event.attention?.occurrence !== "new") return undefined;
+  if (event.attention.reason === "failure"
+    || event.attention.reason === "blocked"
+    || event.attention.reason === "input_required") return event.attention.reason;
+  return undefined;
+}
+
+/** Maps V2's closed sources to this consumer's fixed local presentation vocabulary. */
+export function adaptPresenceState(event: PresenceStateV2, local?: Partial<PresenceUpdate>): PresenceUpdate {
+  const state = event.attention?.reason === "blocked" ? "error" : event.state;
+  const progress = event.progress
+    ? { value: event.progress.completed / event.progress.total, completed: event.progress.completed, total: event.progress.total }
+    : undefined;
+  const reason = attentionReason(event);
+  if (event.source === "subagent") {
+    const counts = event.subagents ?? { running: 0, cancelling: 0, queued: 0, completed: 0, failed: 0, cancelled: 0, omitted: 0 };
+    return {
+      generation: event.generation, sequence: event.sequence, source: { ...SUBAGENT_SOURCE }, state,
+      counts: { active: counts.running + counts.cancelling, queued: counts.queued, completed: counts.completed, failed: counts.failed, cancelled: counts.cancelled, total: counts.running + counts.cancelling + counts.queued + counts.completed + counts.failed + counts.cancelled + counts.omitted },
+      ...(progress ? { progress } : {}), attention: attention(event),
+      ...(reason ? { attentionReason: reason } : {}),
+    };
+  }
+  if (event.source === "interaction") {
+    return {
+      generation: event.generation, sequence: event.sequence, source: { ...INTERACTION_SOURCE }, state: "waiting",
+      counts: { active: event.interaction?.pending ?? 0, completed: 0, failed: 0 }, attention: attention(event),
+      ...(reason ? { attentionReason: reason } : {}),
+    };
+  }
+  const source = event.source === "todo" ? TODO_SOURCE : LOCAL_SOURCE;
+  // Private local overlays are presentation-only and cannot cross a V2 generation.
+  const overlay = local?.generation === event.generation ? local : {};
+  return {
+    generation: event.generation, sequence: event.sequence, source: { ...source }, state,
+    counts: overlay.counts ?? { active: state === "running" || state === "waiting" ? 1 : 0, completed: state === "success" ? 1 : 0, failed: state === "error" ? 1 : 0 },
+    ...(progress ? { progress } : overlay.progress ? { progress: overlay.progress } : {}),
+    ...(overlay.usage ? { usage: overlay.usage } : {}), attention: attention(event),
+    ...(reason ? { attentionReason: reason } : {}),
+  };
+}
+
+/**
+ * Compatibility-only terminal view. Runtime terminal delivery must use the
+ * explicit edge and never retain this value or derive count increments.
+ */
+export function adaptPresenceTerminal(event: PresenceTerminalV2, prior?: PresenceUpdate): PresenceUpdate {
+  const presentation = prior?.generation === event.generation ? prior : undefined;
+  return {
+    generation: event.generation,
+    sequence: event.sequence,
+    source: { ...(event.source === "subagent" ? SUBAGENT_SOURCE : LOCAL_SOURCE) },
+    state: event.outcome === "completed" ? "success" : event.outcome === "failed" ? "error" : "cancelled",
+    counts: presentation?.counts ?? { active: 0, completed: 0, failed: 0 },
+    ...(presentation?.usage ? { usage: presentation.usage } : {}),
+    attention: "none",
+  };
+}
+
+export function isState(event: PresenceEventV2): event is PresenceStateV2 { return "state" in event; }
+export function isTerminal(event: PresenceEventV2): event is PresenceTerminalV2 { return "eventId" in event; }

@@ -21,3 +21,11 @@ export function replaceControlOrBidi(value: string, replacement: string): string
 export function isProtocolToken(value: unknown): value is string {
   return typeof value === "string" && PROTOCOL_TOKEN_RE.test(value);
 }
+
+/** Host IDs are private local inputs, but must remain safe before opt-in use. */
+export function isSafeSessionId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && [...value].length <= 96
+    && !hasControlOrBidi(value);
+}
