@@ -1,178 +1,103 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_COUNT, PresenceEventRegistry, parsePresenceReady, parsePresenceRemove, parsePresenceUpdate } from "../src/events.js";
-import { TodoProgressAdapter } from "../src/todo.js";
+import {
+  createPresenceConsumer,
+  createPresenceProducer,
+  EVENT_NAMES,
+  type PresenceEventV2,
+} from "@pi/presence";
+import { adaptPresenceState, adaptPresenceTerminal, PresenceStateRegistry } from "../src/events.js";
 import { readCmuxIdentity } from "../src/identity.js";
 import { presenceStatusKey } from "../src/presence.js";
+import { TodoProgressAdapter } from "../src/todo.js";
 import { UsageTracker } from "../src/usage.js";
+import { isSafeSessionId } from "../src/validation.js";
 
-const sessionId = "session-1";
-const base = {
-  version: 1 as const, sessionId, generation: 1, sequence: 1,
-  source: { id: "worker", label: "Worker", kind: "task" }, state: "running" as const,
-  counts: { active: 1, completed: 0, failed: 0 }, progress: { value: 0.5, label: "Working" },
-};
+function v2() {
+  const events: PresenceEventV2[] = [];
+  const consumer = createPresenceConsumer({ id: "pi-cmux-presence" })!;
+  const producer = createPresenceProducer({ source: "subagent", emit(name: string, payload: unknown) {
+    const accepted = consumer.accept(name, payload);
+    if (accepted) events.push(accepted);
+  } })!;
+  expect(consumer.activate()).toBe(true);
+  expect(producer.activate()).toBe(true);
+  return { consumer, producer, events };
+}
 
-describe("generic presence event state", () => {
-  test("validates bounds and fences session, generation, and sequence", () => {
-    const registry = new PresenceEventRegistry();
-    registry.start(sessionId);
-    expect(parsePresenceUpdate({ ...base, source: { ...base.source, label: "x".repeat(97) } })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, source: { ...base.source, label: "😀".repeat(96) } })).not.toBeNull();
-    expect(parsePresenceUpdate({ ...base, source: { ...base.source, label: "😀".repeat(97) } })).toBeNull();
-    expect(registry.accept(base)).toBe(true);
-    expect(registry.accept(base)).toBe(false);
-    expect(registry.accept({ ...base, sequence: 2, generation: 0 })).toBe(false);
-    expect(registry.accept({ ...base, sequence: 1, generation: 2, state: "success", counts: { active: 0, completed: 1, failed: 0 } })).toBe(true);
-    expect(registry.accept({ ...base, sequence: 1, generation: 2 })).toBe(false);
-    expect(registry.snapshot()[0]?.state).toBe("success");
+describe("V2 presence state", () => {
+  test("uses shared consumer fences, source labels, and retained replay", () => {
+    const { consumer, producer, events } = v2();
+    expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "running", subagents: { running: 1, cancelling: 0, queued: 2, completed: 3, failed: 0, cancelled: 0, omitted: 0 } })).toBe(true);
+    const event = events[0]!;
+    expect("state" in event && adaptPresenceState(event)).toMatchObject({ source: { id: "subagent", label: "Subagents", kind: "agent-group" }, counts: { active: 1, queued: 2, completed: 3 } });
+    expect(consumer.accept(EVENT_NAMES.state, event)).toBeUndefined();
+    producer.deactivate();
+    consumer.deactivate();
   });
-  test("accepts the full safe generation/sequence domain and canonicalizes untrusted input", () => {
-    const maximum = Number.MAX_SAFE_INTEGER;
-    const input = { ...base, source: { ...base.source }, counts: { ...base.counts }, generation: maximum, sequence: maximum };
-    const parsed = parsePresenceUpdate(input);
-    expect(parsed).toEqual(input);
-    expect(parsed).not.toBe(input);
-    input.source.label = "Changed after parsing";
-    expect(parsed?.source.label).toBe("Worker");
-    expect(parsePresenceUpdate({ ...base, generation: maximum + 1 })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, sequence: 0 })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, counts: { ...base.counts, active: MAX_COUNT + 1 } })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, source: { ...base.source, extra: "no" } })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, counts: { ...base.counts, extra: 1 } })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, progress: { ...base.progress, extra: true } })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, usage: { tokens: 1, extra: true } })).toBeNull();
-    expect(parsePresenceUpdate(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
-    expect(parsePresenceUpdate(new Proxy(base, {}))).toBeNull();
-    expect(parsePresenceUpdate({ ...base, source: new Proxy(base.source, { get() { throw new Error("nope"); } }) })).toBeNull();
-    expect(parsePresenceUpdate({ ...base, counts: new Proxy(base.counts, {}) })).toBeNull();
-    const accessorRoot = { ...base };
-    Object.defineProperty(accessorRoot, "source", { enumerable: true, get() { return base.source; } });
-    const accessorCounts = { ...base, counts: { ...base.counts } };
-    Object.defineProperty(accessorCounts.counts, "completed", { enumerable: true, get() { return 0; } });
-    expect(parsePresenceUpdate(accessorRoot)).toBeNull();
-    expect(parsePresenceUpdate(accessorCounts)).toBeNull();
-  });
-  test("strictly parses remove envelopes as a total function", () => {
-    const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
-    expect(parsePresenceRemove(remove)).toEqual(remove);
-    expect(parsePresenceRemove({ ...remove, version: 2 })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, state: "running" })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, source: { ...remove.source, label: "no" } })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, source: { id: "" } })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, source: { id: "bad\u0085" } })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, source: { id: "bad\u202e" } })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, generation: -1 })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, generation: Number.MAX_SAFE_INTEGER + 1 })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, sequence: 0 })).toBeNull();
-    expect(parsePresenceRemove({ ...remove, sequence: Number.MAX_SAFE_INTEGER + 1 })).toBeNull();
-    expect(parsePresenceRemove(Object.create(null))).toBeNull();
-    expect(parsePresenceRemove(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
-    expect(parsePresenceRemove(new Proxy(remove, {}))).toBeNull();
-    expect(parsePresenceRemove({ ...remove, source: new Proxy(remove.source, { get() { throw new Error("nope"); } }) })).toBeNull();
-    const accessorRemove = { ...remove };
-    Object.defineProperty(accessorRemove, "source", { enumerable: true, get() { return remove.source; } });
-    expect(parsePresenceRemove(accessorRemove)).toBeNull();
-  });
-  test("shares update/remove ordering and retains removal tombstone fences", () => {
-    const remove = { version: 1 as const, sessionId, generation: 1, sequence: 2, source: { id: "worker" } };
-    const registry = new PresenceEventRegistry();
-    registry.start(sessionId);
-    expect(registry.acceptRemove(remove)).toEqual({ accepted: false });
-    expect(registry.accept(base)).toBe(true);
-    expect(registry.acceptRemove({ ...remove, sessionId: "other-session" })).toEqual({ accepted: false });
-    expect(registry.accept({ ...base, source: { id: "pi", label: "Pi", kind: "agent" } })).toBe(true);
-    expect(registry.accept({ ...base, source: { id: "pi-todo", label: "Todo", kind: "task" } })).toBe(true);
-    expect(registry.acceptRemove({ ...remove, source: { id: "pi" } })).toEqual({ accepted: false });
-    expect(registry.acceptRemove({ ...remove, source: { id: "pi-todo" } })).toEqual({ accepted: false });
-    expect(registry.snapshot().map((event) => event.source.id)).toEqual(expect.arrayContaining(["pi", "pi-todo"]));
-    expect(registry.acceptRemove(remove)).toMatchObject({ accepted: true, removed: base });
-    expect(registry.snapshot().map((event) => event.source.id)).toEqual(expect.arrayContaining(["pi", "pi-todo"]));
-    expect(registry.snapshot().some((event) => event.source.id === "worker")).toBe(false);
-    expect(registry.accept({ ...base, sequence: 1 })).toBe(false);
-    expect(registry.accept({ ...base, sequence: 2 })).toBe(false);
-    expect(registry.accept({ ...base, sequence: 3 })).toBe(true);
-    expect(registry.acceptRemove({ ...remove, generation: 0, sequence: 99 })).toEqual({ accepted: false });
-    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 1 }).accepted).toBe(true);
-    expect(registry.accept({ ...base, generation: 2, sequence: 1 })).toBe(false);
-    expect(registry.accept({ ...base, generation: 2, sequence: 2 })).toBe(true);
-    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 3 }).accepted).toBe(true);
-    expect(registry.acceptRemove({ ...remove, generation: 2, sequence: 4 })).toEqual({ accepted: true });
-    expect(registry.accept({ ...base, generation: 3, sequence: 1 })).toBe(true);
 
-    const other = { ...base, sequence: 1, source: { id: "other", label: "Other", kind: "task" } };
-    expect(registry.accept(other)).toBe(true);
-    expect(registry.snapshot().map((event) => event.source.id)).toContain("other");
-
-    const fenced = new PresenceEventRegistry();
-    fenced.start(sessionId);
-    for (let index = 0; index < 64; index += 1) {
-      expect(fenced.accept({ ...base, source: { id: `source-${index}`, label: `Source ${index}`, kind: "task" } })).toBe(true);
+  test("does not replay terminals and keeps terminal adapters quiet and non-authoritative", () => {
+    const { consumer, producer, events } = v2();
+    const late = createPresenceConsumer({ id: "pi-herdr-presence" })!;
+    try {
+      expect(producer.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" })).toBe(true);
+      const terminal = events[0]!;
+      expect("eventId" in terminal && adaptPresenceTerminal(terminal)).toMatchObject({ source: { id: "subagent" }, state: "error", attention: "none", counts: { failed: 0 } });
+      expect(late.activate()).toBe(true);
+      expect(events).toHaveLength(1);
+    } finally {
+      producer.deactivate(); consumer.deactivate(); late.deactivate();
     }
-    expect(fenced.acceptRemove({ ...remove, source: { id: "source-0" } }).accepted).toBe(true);
-    expect(fenced.accept({ ...base, source: { id: "source-64", label: "Source 64", kind: "task" } })).toBe(false);
   });
-  test("uses fixed-length SHA-256 status keys for maximum-length source IDs", () => {
-    const key = presenceStatusKey("x".repeat(96));
-    expect(key).toMatch(/^pi-presence:[a-f0-9]{64}$/);
-    expect(key).toHaveLength("pi-presence:".length + 64);
+
+  test("maps V2 blocked attention to error-style needs-attention presentation", () => {
+    const blocked = {
+      version: 2 as const, generation: 1, sequence: 1, source: "pi" as const, state: "waiting" as const,
+      attention: { reason: "blocked" as const, occurrence: "new" as const }, sessionEpoch: "test",
+    };
+    expect(adaptPresenceState(blocked).state).toBe("error");
+    expect(adaptPresenceState(blocked).attention).toBe("error");
   });
-  test("requires both canonical target identities", () => {
+
+  test("terminal adapters preserve authoritative cumulative state without inventing counts", () => {
+    const terminal = { version: 2 as const, generation: 2, sequence: 9, source: "subagent" as const, eventId: 4, outcome: "failed" as const, sessionEpoch: "test" };
+    const prior = { generation: 2, sequence: 8, source: { id: "subagent", label: "Subagents", kind: "agent-group" }, state: "error" as const, counts: { active: 0, completed: 7, failed: 3 }, attention: "none" as const };
+    expect(adaptPresenceTerminal(terminal, prior).counts).toMatchObject({ completed: 7, failed: 3 });
+    expect(adaptPresenceTerminal(terminal).counts).toMatchObject({ completed: 0, failed: 0 });
+  });
+
+  test("withdrawal removes state and higher generation reopens it", () => {
+    const { consumer, producer, events } = v2();
+    const registry = new PresenceStateRegistry();
+    producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting", subagents: { running: 0, cancelling: 0, queued: 1, completed: 0, failed: 0, cancelled: 0, omitted: 0 } });
+    registry.set(adaptPresenceState(events.at(-1)! as Extract<PresenceEventV2, { state: string }>));
+    producer.withdraw({ version: 2, generation: 1, sequence: 2, source: "subagent" });
+    expect(registry.remove("subagent")).toBeDefined();
+    expect(producer.publishState({ version: 2, generation: 1, sequence: 3, source: "subagent", state: "waiting", subagents: { running: 0, cancelling: 0, queued: 1, completed: 0, failed: 0, cancelled: 0, omitted: 0 } })).toBe(false);
+    expect(producer.publishState({ version: 2, generation: 2, sequence: 0, source: "subagent", state: "waiting", subagents: { running: 0, cancelling: 0, queued: 1, completed: 0, failed: 0, cancelled: 0, omitted: 0 } })).toBe(true);
+    producer.deactivate(); consumer.deactivate();
+  });
+
+  test("accepts only bounded control- and bidi-free host session IDs", () => {
+    expect(isSafeSessionId("safe-session.1")).toBe(true);
+    expect(isSafeSessionId("")).toBe(false);
+    expect(isSafeSessionId("bad\u202e")).toBe(false);
+    expect(isSafeSessionId("😀".repeat(97))).toBe(false);
+  });
+
+  test("uses fixed-length status keys and canonical cmux identities", () => {
+    expect(presenceStatusKey("subagent")).toMatch(/^pi-presence:[a-f0-9]{64}$/);
     const target = "00000000-0000-4000-8000-000000000000";
     expect(readCmuxIdentity({ CMUX_WORKSPACE_ID: "not-a-uuid", CMUX_SURFACE_ID: target })).toBeNull();
-    expect(readCmuxIdentity({ CMUX_WORKSPACE_ID: target })).toBeNull();
-    expect(readCmuxIdentity({ CMUX_SURFACE_ID: target })).toBeNull();
     expect(readCmuxIdentity({ CMUX_WORKSPACE_ID: target, CMUX_SURFACE_ID: target })).not.toBeNull();
   });
-  test("strictly parses authority-free ready requests and additive count fields", () => {
-    expect(parsePresenceReady({ version: 1, sessionId })).toEqual({ version: 1, sessionId });
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "pi-cmux-presence", capabilities: ["cmux-status", "cmux-progress"] } })).toEqual({ version: 1, sessionId, consumer: { id: "pi-cmux-presence", capabilities: ["cmux-status", "cmux-progress"] } });
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: Array(17).fill("x") } })).toBeNull();
-    expect(parsePresenceReady({ version: 1, sessionId, source: "no" })).toBeNull();
-    expect(parsePresenceReady({ version: 1, sessionId: "bad\u202e" })).toBeNull();
-    const sparseCapabilities = new Array<string>(1);
-    const proxiedCapabilities = new Proxy(["cmux-status"], {});
-    const accessorCapabilities = ["cmux-status"];
-    Object.defineProperty(accessorCapabilities, "0", { enumerable: true, get() { throw new Error("nope"); } });
-    const inheritedRoot = Object.create({ version: 1, sessionId });
-    const inheritedConsumer = Object.create({ id: "consumer", capabilities: [] });
-    const rootAccessor = { version: 1, sessionId };
-    Object.defineProperty(rootAccessor, "consumer", { enumerable: true, get() { throw new Error("nope"); } });
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: sparseCapabilities } })).toBeNull();
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: proxiedCapabilities } })).toBeNull();
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: { id: "x", capabilities: accessorCapabilities } })).toBeNull();
-    expect(parsePresenceReady(inheritedRoot)).toBeNull();
-    expect(parsePresenceReady({ version: 1, sessionId, consumer: inheritedConsumer })).toBeNull();
-    expect(parsePresenceReady(rootAccessor)).toBeNull();
-    expect(parsePresenceReady(new Proxy({}, { getPrototypeOf() { throw new Error("nope"); } }))).toBeNull();
-    expect(parsePresenceUpdate({ ...base, state: "waiting", counts: { active: 0, completed: 1, failed: 0, queued: 2, cancelled: 1, total: 4 } })?.counts).toMatchObject({ queued: 2, cancelled: 1, total: 4 });
-    expect(parsePresenceUpdate({ ...base, source: { ...base.source, label: "bad\u0085" } })).toBeNull();
-    for (const directional of ["\u061c", "\u200e", "\u200f", "\u2028", "\u2029", "\u202a", "\u2066"]) expect(parsePresenceUpdate({ ...base, source: { ...base.source, label: `bad${directional}` } })).toBeNull();
-  });
-  test("accepts the RPIV TaskDetails envelope and never copies descriptive task text", () => {
+
+  test("keeps todo task text private and local usage separate", () => {
     const adapter = new TodoProgressAdapter();
     const tools = [{ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } }];
-    const details = { action: "list", params: {}, nextId: 5, tasks: [{ id: 1, status: "completed", subject: "secret" }, { id: 2, status: "in_progress", description: "private" }, { id: 3, status: "pending" }, { id: 4, status: "deleted" }] };
-    const valid = adapter.accept({ toolName: "todo", isError: false, content: [{ text: "secret" }], details }, tools, sessionId, 1, 2);
-    expect(valid).toMatchObject({ source: { id: "pi-todo" }, counts: { active: 1, completed: 1, queued: 1, total: 3 }, progress: { value: 1 / 3 } });
-    expect(JSON.stringify(valid)).not.toContain("secret");
-    expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [{ id: 9, status: "completed" }] } }, tools, sessionId, 1, 3)).toMatchObject({ state: "success", progress: { value: 1 }, counts: { total: 1 } });
-    expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [{ id: 1, status: "pending" }, { id: 1, status: "completed" }] } }, tools, sessionId, 1, 3)).toBeNull();
-    for (const tasks of [
-      [{ id: 7, status: "deleted" }, { id: 7, status: "deleted" }],
-      [{ id: 7, status: "deleted" }, { id: 7, status: "pending" }],
-      [{ id: 7, status: "completed" }, { id: 7, status: "deleted" }],
-    ]) {
-      expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks } }, tools, sessionId, 1, 3)).toBeNull();
-    }
-    expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, extra: true } }, tools, sessionId, 1, 4)).toBeNull();
-    expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [{ id: 0, status: "pending" }] } }, tools, sessionId, 1, 5)).toBeNull();
-    expect(adapter.accept({ toolName: "todo", isError: false, details: { ...details, tasks: [] } }, [{ name: "todo", sourceInfo: { path: "/changed", source: "project", scope: "project", origin: "top-level" } }], sessionId, 1, 6)).toBeNull();
-  });
-  test("adds per-message usage deltas and tracks optional context usage", () => {
-    const usage = new UsageTracker();
-    usage.add({ input: 10, output: 5, cacheRead: 2, cost: { total: 0.03 } });
-    usage.add({ totalTokens: 7, cost: 0.02 });
-    usage.setContext({ percent: 42 });
-    expect(usage.snapshot()).toEqual({ tokens: 24, cost: 0.05, contextPercent: 42 });
+    const result = adapter.accept({ toolName: "todo", isError: false, details: { action: "list", params: {}, nextId: 3, tasks: [{ id: 1, status: "completed", subject: "secret" }, { id: 2, status: "pending" }] } }, tools, 1, 1);
+    expect(result).toMatchObject({ source: { id: "todo" }, counts: { completed: 1, queued: 1 } });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    const usage = new UsageTracker(); usage.add({ input: 10, output: 5 }); usage.setContext({ percent: 42 });
+    expect(usage.snapshot()).toEqual({ tokens: 15, contextPercent: 42 });
   });
 });

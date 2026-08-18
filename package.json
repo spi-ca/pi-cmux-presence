@@ -11,7 +11,7 @@
     "extensions": ["./index.ts"]
   },
   "scripts": {
-    "test": "bun test --pass-with-no-tests",
+    "test": "set -e; for file in test/*.test.ts; do bun test --pass-with-no-tests \"$file\"; done",
     "check": "bunx tsc --noEmit",
     "lint": "biome lint --error-on-warnings .",
     "ci": "bun run lint && bun run check && bun run test",
@@ -33,5 +33,8 @@
       "optional": true
     }
   },
-  "packageManager": "bun@1.3.14"
+  "packageManager": "bun@1.3.14",
+  "dependencies": {
+    "@pi/presence": "github:spi-ca/pi-presence#v2-20260818-2"
+  }
 }

@@ -5,7 +5,7 @@ import { boundedPresenceText } from "./text.js";
 import type { AttentionKind } from "./notification-policy.js";
 
 const STATUS_PREFIX = "pi-presence";
-const TODO_SOURCE = "pi-todo";
+const TODO_SOURCE = "todo";
 
 export interface PresenceStyle {
   icon: string;
@@ -121,7 +121,12 @@ export function formatStateText(event: PresenceUpdate, maxCodePoints: number): s
 }
 
 export function formatProgressText(event: PresenceUpdate, maxCodePoints: number): string {
-  return boundedPresenceText(event.progress?.label ?? event.source.label, {
+  const progress = event.progress;
+  // V2 supplies only bounded numeric progress. Never borrow producer text.
+  const label = progress?.completed !== undefined && progress.total !== undefined
+    ? `Source ${progress.completed}/${progress.total}`
+    : event.source.label;
+  return boundedPresenceText(label, {
     maxBytes: CMUX_TEXT_BYTES.v1Text,
     maxCodePoints,
   });

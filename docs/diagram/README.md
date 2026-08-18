@@ -13,7 +13,7 @@ bun run diagram:render
 | 원본 | 렌더 결과 | 설명 |
 | --- | --- | --- |
 | [`architecture.mmd`](architecture.mmd) | `architecture.svg`, `architecture.png` | Pi lifecycle에서 Unix 소켓 cmux 출력까지의 전체 presence 아키텍처 |
-| [`event-flow.mmd`](event-flow.mmd) | `event-flow.svg`, `event-flow.png` | ready capability 광고부터 `pi-presence:update:v1`·`remove:v1` 공유 fence, retained 상태 렌더링·철회, session teardown까지의 이벤트 흐름 |
+| [`event-flow.mmd`](event-flow.mmd) | `event-flow.svg`, `event-flow.png` | shared presence를 cmux status·progress·attention으로 투영하고 철회·session teardown까지 처리하는 이벤트 흐름. protocol/lifecycle/terminal semantics는 [canonical docs](https://github.com/spi-ca/pi-presence/tree/v2-20260818-2/docs)를 따른다 |
 | [`socket-resolution.mmd`](socket-resolution.mmd) | `socket-resolution.svg`, `socket-resolution.png` | cmux identity(workspace/surface UUID), runtime 공유 fingerprint lease gate·ancestor 검증, 공식 cmux hook precedence 게이팅 |
 | [`protocol-negotiation.mmd`](protocol-negotiation.mmd) | `protocol-negotiation.svg`, `protocol-negotiation.png` | V2 `system.capabilities` probe와 지원 메서드 게이팅, V1 설정 게이팅, best-effort 실패 처리 |
 | [`transport-state.mmd`](transport-state.mmd) | `transport-state.svg`, `transport-state.png` | post-connect pending response hard gate, shared stale fingerprint lease와 `UnixSocketTransport`/`BoundedSocketQueue` lifecycle |

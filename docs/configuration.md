@@ -32,15 +32,15 @@ boolean은 trim 및 대소문자 무시 후 `1`/`true`/`yes`/`on`, `0`/`false`/`
 
 notification 정책은 다음과 같습니다.
 
-- `errors`: `attention: "error"`만 알립니다.
+- `errors`: structured V2 `failure`/`blocked` attention 또는 terminal failure가 consumer 내부에서 error로 매핑된 경우만 알립니다.
 - `background`(기본): 일반 외부 producer의 non-`none` attention과 error를 알리되, 내장 Pi의 단독 성공은 알리지 않습니다. 부모 성공과 `pi-subagent` 성공 집계가 실제 settlement에서 합쳐진 경우만 내장 성공으로 알릴 수 있습니다.
-- `settled`: 정확히 settle된 local Pi 성공·error와 외부 error를 알립니다. 일반 외부 `info`·`success`는 알리지 않습니다. 단, 성공한 부모 settlement와 exact `pi-subagent` 성공 집계가 병합된 결과는 finalized local completion이므로 성공 알림 대상입니다. 즉 standalone local success/error는 yes, generic external info/success는 no, merged parent/subagent success는 yes, external error는 yes입니다.
+- `settled`: 정확히 settle된 local Pi 성공·error와 외부 error를 알립니다. 일반 외부 `info`·`success`는 알리지 않습니다. 단, 성공한 부모 settlement와 exact `subagent` 성공 집계가 병합된 결과는 finalized local completion이므로 성공 알림 대상입니다. 즉 standalone local success/error는 yes, generic external info/success는 no, merged parent/subagent success는 yes, external error는 yes입니다.
 - `all`: 모든 non-`none` attention을 알립니다.
 - `disabled`: notification을 만들지 않습니다.
 
 기본값은 계속 `background`이며 `settled`는 명시 opt-in입니다. 여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지는 focus polling을 하지 않고 신뢰할 수 있는 read-only focus capability도 사용하지 않습니다. focused surface의 banner를 보일지 억제할지는 cmux가 소유합니다.
 
-외부 interaction handover가 정확히 `source.kind: "interaction"`, `state: "waiting"`, `attention: "info"`이면 고정 표시 `Pi needs your input`에 대해 이와 같은 기존 gate를 적용합니다. 따라서 `info`가 `all`·`background` 등 현재 policy에서 허용되더라도 해당 channel의 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. 같은 profile에서 `attention: "none"` 또는 생략은 status/progress-only이며, ready replay도 attention을 만들지 않습니다. 이 동작을 위한 환경 변수·capability는 추가되지 않았고 `error`·`success`는 generic external attention 규칙으로 처리합니다.
+유효한 shared input-required presence는 고정 표시 `Pi needs your input`으로 투영합니다. 새 attention만 기존 gate를 따르므로 policy가 허용해도 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. retained 표시 갱신은 status-only입니다. 이 동작은 새 환경 변수·capability를 만들지 않으며 모든 Pi input wait의 감지나 producer lifecycle authority를 뜻하지 않습니다. shared input shape와 lifecycle은 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md)을 따릅니다.
 
 flash 정책은 다음과 같습니다.
 
@@ -50,9 +50,9 @@ native notification/flash의 precedence는 다음과 같습니다. 공식 cmux h
 - `attention`: 위 notification 정책의 attention 대상과 같은 경우 flash합니다.
 - `disabled`: flash하지 않습니다.
 
-notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 정확한 `pi-subagent`의 terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 현재 같은 종류 window를 연장하지 않지만, window가 닫힌 뒤에는 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. 활성 부모 error는 settlement를 기다리되 최초 error부터 최대 10초 후 한 번 dispatch하며, timeout만 그 부모 run의 뒤늦은 settlement를 fence합니다. 비활성 success grace가 닫히기 전에 부모가 아직 비활성인 동안 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. 취소와 ready replay(`attention: "none"`)는 attention을 만들지 않습니다.
+notification과 flash 모두 해당 V2 capability가 광고되어야 합니다. 고정 source 문자열 `subagent`의 live terminal window는 success 450ms/error 100ms로 고정된 **semantic window**이며 부모가 활성이어도 닫히고, 열린 window 안의 부모 settlement는 종료까지 dispatch를 보류합니다. 단, 이미 settle된 이전 부모 aggregate가 열린 채 다음 부모 run이 시작되면 lifecycle boundary에서 이전 aggregate를 dispatch해 run 간 결합을 막습니다. 이 window는 parent-run aggregate의 수명과 별개입니다. 같은 부모 run에 연결된 뒤늦은 terminal은 현재 같은 종류 window를 연장하지 않지만, window가 닫힌 뒤에는 새 고정 window를 시작해도 aggregate에 누적되어 settlement까지 유지될 수 있습니다. success 뒤 최초 error는 자체 고정 100ms window를 시작합니다. 활성 부모 error는 settlement를 기다리되 최초 error부터 최대 10초 후 한 번 dispatch하며, timeout만 그 부모 run의 뒤늦은 settlement를 fence합니다. 비활성 success grace가 닫히기 전에 부모가 아직 비활성인 동안 error가 오면 그 아직 settle되지 않은 미래 parent 예약은 끊기며, error는 100ms window 안에 부모가 시작해도 독립적으로 dispatch합니다. 자세한 누적·settlement 규칙은 [`event-contract.md`](event-contract.md)를 참고하세요. cancelled terminal과 retained state replay는 attention을 만들지 않습니다.
 
-별도 환경 변수 없이 external attention 출력에는 session-wide safety bound가 적용됩니다. 처음 4개 attention은 즉시 처리하고 그 뒤에는 1초마다 하나만 추가 처리합니다. 대기 항목은 최대 64개이며 같은 source·attention category는 최신 상태로 coalesce하고 error가 우선합니다. 이는 policy가 허용한 genuine input/error lifecycle을 가능한 한 보존하면서 same-process producer의 generation/`none` churn이 notification·flash·log storm을 지속하지 못하게 하는 고정 안전 한도입니다.
+별도 환경 변수 없이 external attention 출력에는 session-wide safety bound가 적용됩니다. 처음 4개 attention은 즉시 처리하고 그 뒤에는 1초마다 하나만 추가 처리합니다. 대기 항목은 최대 64개이며 같은 fixed source·consumer attention category는 최신 상태로 coalesce하고 error가 우선합니다. 이는 policy가 허용한 genuine input/error lifecycle을 가능한 한 보존하면서 same-runtime producer의 generation 또는 retained-state churn이 notification·flash·log storm을 지속하지 못하게 하는 고정 안전 한도입니다.
 
 ### 검토한 외부 cmux child profile
 
@@ -77,13 +77,13 @@ capability result는 top-level key가 `protocol`, `version`, `methods`, 선택 `
 
 native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|idle`을 해당 `--panel=<CMUX_SURFACE_ID>`에 보냅니다. `idle`은 cmux에 유휴 상태를 알리는 신호이며, 이 확장이 hibernate/resume을 수행하거나 실행 lifecycle authority를 갖는 것은 아닙니다. 공식 cmux hook precedence가 적용되면 이 native lifecycle도 보내지 않습니다(아래 "identity·소켓과 공식 hook 우선순위" 참고).
 
-### consumer-side `pi-presence:remove:v1`
+### Shared presence 철회 projection
 
-이 event에는 별도 환경 변수가 없습니다. consumer는 ready `capabilities`에 `presence-remove-v1`을 광고하며, 수락된 외부 remove가 실제 retained 상태를 철회했을 때만 그 source의 status를 clear합니다. 확립된 sidebar client가 보낸 최신 clear가 확인되지 않으면 source 상한 안의 idempotent clear intent 하나를 client teardown까지 보관해 그 teardown에서 한 번 우선 재시도하며, polling이나 이후 event에 따른 재시도는 하지 않습니다. 확인된 clear는 재시도하지 않습니다. 남은 retained 상태로 progress를 다시 선택하고, 공식 hook이 우선하지 않으며 `PI_CMUX_PRESENCE_META_BLOCK=true`인 경우 meta block을 다시 계산합니다. tombstone을 향한 더 높은 remove는 수락되어 fence만 전진시키므로 status clear를 만들지 않습니다.
+이 동작에는 별도 환경 변수가 없습니다. shared presence가 철회되면 consumer는 실제 retained projection이 있던 source의 status만 clear하고, 남은 projection으로 progress와 opt-in meta block을 다시 계산합니다. 최신 clear가 확인되지 않으면 session teardown에서 한 번만 best-effort 재시도할 수 있습니다. 철회 자체는 `PI_CMUX_PRESENCE_LOG`, notification/flash 정책, `PI_CMUX_PRESENCE_FEED`와 무관하게 새 log·notification·flash·feed를 만들지 않습니다.
 
-remove는 `PI_CMUX_PRESENCE_LOG`, notification 정책, flash 정책, `PI_CMUX_PRESENCE_FEED`와 무관하게 새 generic log·notification·flash·feed를 만들지 않습니다. 이미 만든 notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다. 정확한 `pi-subagent` source의 remove는 보류된 child terminal 상태를 무효화하며, 그 상태가 보류했던 local parent attention은 기존 notification/flash policy와 capability gate를 적용한 local fallback으로만 처리할 수 있습니다.
+subagent projection을 철회하면 보류된 completion aggregate도 무효화하고, 그 aggregate가 보류한 local parent attention만 기존 policy와 capability gate를 적용해 fallback으로 처리할 수 있습니다. notification 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
-payload의 정확한 키, 공유 generation/sequence fence, reserved source와 이전 consumer/producer 호환성은 [`event-contract.md`](event-contract.md)를 참고하세요. producer의 capability gate, ready replay, 개인정보, 동시성 및 lifecycle은 이 consumer 패키지의 설정·구현 범위 밖이며 이 저장소에는 ask-user producer가 없습니다.
+shared withdrawal의 payload, delivery, retention과 ordering semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md)을 따릅니다. shared runtime의 producer lifecycle은 이 consumer package의 실행 authority 밖이며 이 저장소에는 ask-user producer가 없습니다.
 
 ## opt-in 데이터와 resume 보호
 
@@ -96,7 +96,9 @@ payload의 정확한 키, 공유 generation/sequence fence, reserved source와 �
 
 `auto title`은 Pi가 제공한 session name을 보낼 수 있고, `resume fallback`은 session ID와 `pi --session '<sessionId>'`를 binding에 보냅니다. 따라서 모두 기본 비활성입니다.
 
-feed의 session/tool call ID와 resume fallback의 checkpoint ID는 cmux protocol의 `[A-Za-z0-9_.:-]{1,128}` token이어야 합니다. tool name은 control/bidi 문자가 없는 1–128 UTF-8 bytes text여야 합니다. process-local safe text에는 해당하지만 이 형식을 벗어나는 session ID, tool call ID 또는 tool name이 있으면 validator가 해당 feed 요청 전체를 생략합니다. 같은 token 제약을 벗어난 session ID에서는 resume fallback도 생략합니다.
+feed의 session/tool call ID와 resume fallback의 checkpoint ID는 cmux protocol의 `[A-Za-z0-9_.:-]{1,128}` token이어야 합니다. tool name은 control/bidi 문자가 없는 1–128 UTF-8 bytes text여야 합니다. session ID가 이 형식을 벗어나면 해당 session의 feed를 시작하지 않습니다. `PreToolUse`·`PostToolUse`는 tool call ID와 tool name 모두가 유효할 때만 전송하며, 하나라도 누락되거나 형식을 벗어나면 식별자를 제거한 익명 tool event로 바꾸지 않고 해당 edge 전체를 생략합니다. 이 규칙은 초기화 전 queue와 초기화 후 즉시 전송 경로에 동일하게 적용됩니다. 같은 token 제약을 벗어난 session ID에서는 resume fallback도 생략합니다.
+
+owned cmux output이 준비되기 **전**에만 feed edge를 최대 32개까지 local queue에 보관합니다. 33번째 유효 edge는 그 세션의 local queue를 비우고 feed를 fail-close하므로 startup prefix나 이후 suffix를 보내지 않습니다. readiness 시에는 이 snapshot 전체를 같은 JavaScript turn에서 client의 기존 bounded socket queue에 순서대로 제출한 뒤 local queue를 제거합니다. 준비된 뒤의 edge는 local queue를 다시 만들지 않고 곧바로 그 client queue에 제출합니다. 따라서 ready/in-flight 쓰기의 backpressure·개별 best-effort 유실은 client transport의 `PI_CMUX_PRESENCE_MAX_QUEUE` 정책이 소유하며, runtime local queue overflow가 이미 제출한 prefix를 지우거나 `SessionStart`만 남기는 일은 없습니다.
 
 resume fallback은 `surface.resume.get`으로 기존 binding을 먼저 읽습니다. binding이 비어 있거나 동일 checkpoint인 경우에만 설정하며, 다른 checkpoint 또는 해석할 수 없는 binding은 덮어쓰지 않습니다. 설정 뒤에도 같은 binding의 소유를 확인해야 하며, shutdown에서 자신이 확인한 동일 binding만 `surface.resume.clear`로 제거합니다.
 
@@ -119,7 +121,7 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 | `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
 | `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
 
-외부 producer의 정확한 interaction profile(`source.kind: "interaction"`, `state: "waiting"`, `attention`이 `"info"`·`"none"`·생략 중 하나)도 label·progress label·기타 payload text 대신 sidebar와 제공된 progress에 `Pi needs your input`만 사용합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며, 해당 producer의 lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `info`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `none`·생략은 notification·flash·log 없이 표시만 갱신하므로 ready replay도 status-only입니다. `error`·`success`는 generic 표시와 attention 정책을 사용합니다.
+고정 `interaction` source의 strict V2 profile(`state: "waiting"`, `interaction: { kind: "ask_user", pending }`, `attention: { reason: "input_required", occurrence }`)은 label이나 payload text 대신 sidebar에 `Pi needs your input`만 사용합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며 producer lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `occurrence: "new"`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `occurrence: "retained"` replay는 notification·flash·log 없이 표시만 갱신합니다.
 
 local terminal은 `agent_end`만으로 확정하지 않고 settlement를 의미하는 `agent_settled`에서 최종 publish합니다. hook context가 `isIdle()`을 제공하고 `false`를 반환하면 아직 idle이 아니므로 확정하지 않으며, context나 함수가 없으면 `agent_settled` hook 자체를 settlement 증거로 사용합니다. host가 그 hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
@@ -135,7 +137,7 @@ local terminal은 `agent_end`만으로 확정하지 않고 settlement를 의미�
 
 소켓의 lexical path와 resolved parent부터 filesystem root까지 모든 ancestor를 검사합니다. 각 디렉터리는 root 또는 현재 UID 소유이고 group/other writable이면 안 됩니다. lexical symlink ancestor는 root 소유인 경우만 허용하며, root 소유 sticky `/tmp`·`/private/tmp`만 공유 ancestor 예외로 허용합니다. 소켓 owner-only 조건은 그대로 적용됩니다. 연결 직전과 직후 device/inode/UID·전체 ancestor 안전성을 재검사해 교체 경로를 거부합니다. 요청 deadline은 연결 전 fingerprint부터 시작하므로 느린 파일시스템 검증도 연결·write보다 먼저 timeout/abort로 끝납니다. post-connect fingerprint 비교와 request `write()` 전에는 어떤 response도 수락하지 않습니다. **실제로 post-connect fingerprint가 미해결인 동안** unsolicited data, end, close, error가 오면 요청을 거부하고 active queue를 fail-close하며, 이미 시작한 fingerprint의 runtime 공유 lease는 실제 settle까지 유지됩니다. runtime이 만든 모든 transport와 session replacement는 fingerprint lease gate 하나를 공유하지만, 각 transport는 module-intrinsic `safeSocketFingerprint`를 직접 실행하므로 gate override나 malformed 값으로 fingerprint 결과를 만들 수 없습니다. standalone transport도 자체 gate를 가집니다. 연결 전 connect error/timeout과 두 fingerprint 완료 뒤의 일반 응답 timeout은 현재 요청만 거부하고 transport를 poison하지 않습니다. startup 경로 검증도 같은 timeout 안에서 client 소유권을 얻기 전에 끝나며, 늦게 끝난 검증 결과는 client·socket write·presence 출력을 만들지 않습니다. deadline/epoch abort로 남은 startup resolver는 settle할 때까지 독점 상태로 남아 반복 session start가 새 filesystem 검증을 만들지 않으며, 그 stale 결과는 어떤 epoch에도 재사용하지 않습니다.
 
-`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)의 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 cmux hook이 우선합니다. 환경 변수 값이 `~` 또는 `~/`로 시작하면 현재 사용자의 home directory로 확장하며 `~other` 형태는 추측해 확장하지 않습니다. probe는 소켓 해석 전에 같은 `PI_CMUX_PRESENCE_TIMEOUT_MS` deadline 및 session epoch abort로 제한됩니다. timeout, abort, 읽기 오류, regular file이 아닌 경로 또는 64 KiB를 넘는 source는 **불확실**하므로 fail-closed하여 공식 hook이 있다고 간주합니다. 실제로 아직 settle하지 않은 probe는 하나만 남기며, 반복 session start는 새 probe를 만들지 않고 authority를 계속 억제합니다. marker가 없는 정상 크기 regular file과 확인된 부재만 hook 부재로 처리합니다. 감지 결과는 session epoch와 session ID로 fence하므로 늦은 이전 probe가 현재 세션의 hook precedence를 바꾸지 않습니다. 이때 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention은 이 패키지가 보내지 않습니다. 일반 외부 producer는 계속 처리하지만, 정확히 `source.id: "pi-subagent"`의 버퍼된 success는 native notification/flash를 보내지 않으며(설정한 V1 log는 가능), 그 source의 집계 error는 정책·capability가 허용하면 한 번 보냅니다. `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`의 기본값은 `true`이지만 이 precedence를 넘지 않습니다.
+`$PI_CODING_AGENT_DIR/extensions/cmux-session.ts`(기본 `~/.pi/agent/extensions/cmux-session.ts`)의 `cmux-pi-session-extension-marker v2`가 있고 `CMUX_PI_HOOKS_DISABLED`가 `1`이 아니면 공식 cmux hook이 우선합니다. 환경 변수 값이 `~` 또는 `~/`로 시작하면 현재 사용자의 home directory로 확장하며 `~other` 형태는 추측해 확장하지 않습니다. probe는 소켓 해석 전에 같은 `PI_CMUX_PRESENCE_TIMEOUT_MS` deadline 및 session epoch abort로 제한됩니다. timeout, abort, 읽기 오류, regular file이 아닌 경로 또는 64 KiB를 넘는 source는 **불확실**하므로 fail-closed하여 공식 hook이 있다고 간주합니다. 실제로 아직 settle하지 않은 probe는 하나만 남기며, 반복 session start는 새 probe를 만들지 않고 authority를 계속 억제합니다. marker가 없는 정상 크기 regular file과 확인된 부재만 hook 부재로 처리합니다. 감지 결과는 session epoch와 session ID로 fence하므로 늦은 이전 probe가 현재 세션의 hook precedence를 바꾸지 않습니다. 이때 native lifecycle, feed, meta block, auto-title, resume fallback, 내장 Pi completion attention은 이 패키지가 보내지 않습니다. 일반 외부 V2 state는 계속 처리하지만, 고정 `subagent` source의 버퍼된 success는 native notification/flash를 보내지 않으며(설정한 V1 log는 가능), 그 source의 집계 error는 정책·capability가 허용하면 한 번 보냅니다. `PI_CMUX_PRESENCE_NATIVE_LIFECYCLE`의 기본값은 `true`이지만 이 precedence를 넘지 않습니다.
 
 ## 실패 방식과 문제 해결
 
