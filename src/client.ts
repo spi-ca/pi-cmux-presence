@@ -9,7 +9,7 @@ import {
   type V1Command,
   type V2Method,
 } from "./protocol.js";
-import { UnixSocketTransport } from "./transport.js";
+import { type SocketQueueOptions, UnixSocketTransport } from "./transport.js";
 
 const OPTIONAL_METHODS = new Set<V2Method>([
   "notification.create_for_surface",
@@ -220,7 +220,7 @@ export class PresenceClient {
       workspace_id: this.identity.workspaceId,
       surface_id: this.identity.surfaceId,
       event: payload,
-    });
+    }, undefined, { displaceable: true });
   }
 
   async autoTitle(title: string): Promise<void> {
@@ -309,8 +309,9 @@ export class PresenceClient {
     method: V2Method,
     params: Record<string, unknown>,
     key?: string,
+    queueOptions?: SocketQueueOptions,
   ): Promise<unknown | undefined> {
-    return this.supported.has(method) ? await this.v2(method, params, key) : undefined;
+    return this.supported.has(method) ? await this.v2(method, params, key, queueOptions) : undefined;
   }
 
   private async v1(command: V1Command, key?: string): Promise<boolean> {
@@ -328,11 +329,12 @@ export class PresenceClient {
     method: V2Method,
     params: Record<string, unknown>,
     key?: string,
+    queueOptions?: SocketQueueOptions,
   ): Promise<unknown | undefined> {
     if (this.closed) return undefined;
     const id = this.nextId++;
     try {
-      const response = await this.transport.request(encodeV2({ id, method, params }), key);
+      const response = await this.transport.request(encodeV2({ id, method, params }), key, queueOptions);
       return decodeV2Response(response, id);
     } catch {
       return undefined;

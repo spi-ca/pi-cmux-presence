@@ -286,15 +286,23 @@ async function exchange(
 
 interface Pending<T> {
   key?: string;
+  displaceable: boolean;
   work: (signal: AbortSignal) => Promise<T>;
   promise: Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
 }
 
+export interface SocketQueueOptions {
+  /** Optional work may be dropped to make room for primary output. */
+  displaceable?: boolean;
+}
+
 /**
  * Serial bounded queue. Pending work with the same key uses latest-write-wins
- * coalescing and shares one promise. Active work is never replaced.
+ * coalescing and shares one promise. Displaceable work is kept in FIFO order,
+ * but primary work is inserted ahead of it and may evict its newest entry.
+ * Active work is never replaced.
  */
 export class BoundedSocketQueue {
   private readonly queue: Array<Pending<unknown>> = [];
@@ -309,6 +317,7 @@ export class BoundedSocketQueue {
   enqueue<T>(
     work: ((signal: AbortSignal) => Promise<T>) | (() => Promise<T>),
     key?: string,
+    options?: SocketQueueOptions,
   ): Promise<T> {
     if (this.closed) return Promise.reject(new PresenceTransportError("Socket queue is closed."));
 
@@ -319,8 +328,22 @@ export class BoundedSocketQueue {
         return existing.promise;
       }
     }
+
+    const displaceable = options?.displaceable === true;
     if (this.queue.length >= this.maxQueue) {
-      return Promise.reject(new PresenceTransportError("Socket queue is full."));
+      if (displaceable) return Promise.reject(new PresenceTransportError("Socket queue is full."));
+
+      let displacedAt = -1;
+      for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+        if (this.queue[index].displaceable) {
+          displacedAt = index;
+          break;
+        }
+      }
+      if (displacedAt < 0) return Promise.reject(new PresenceTransportError("Socket queue is full."));
+      const [displaced] = this.queue.splice(displacedAt, 1);
+      if (displaced.key) this.coalesced.delete(displaced.key);
+      displaced.reject(new PresenceTransportError("Socket queue work displaced by primary output."));
     }
 
     let resolve!: (value: T) => void;
@@ -331,13 +354,18 @@ export class BoundedSocketQueue {
     });
     const pending: Pending<T> = {
       key,
+      displaceable,
       work: work as (signal: AbortSignal) => Promise<T>,
       promise,
       resolve,
       reject,
     };
 
-    this.queue.push(pending as Pending<unknown>);
+    const firstDisplaceable = displaceable
+      ? -1
+      : this.queue.findIndex((queued) => queued.displaceable);
+    if (firstDisplaceable < 0) this.queue.push(pending as Pending<unknown>);
+    else this.queue.splice(firstDisplaceable, 0, pending as Pending<unknown>);
     if (key) this.coalesced.set(key, pending as Pending<unknown>);
     this.startDrain();
     return promise;
@@ -428,7 +456,7 @@ export class UnixSocketTransport {
     this.queue = new BoundedSocketQueue(maxQueue);
   }
 
-  request(line: string, key?: string): Promise<string> {
+  request(line: string, key?: string, options?: SocketQueueOptions): Promise<string> {
     return this.queue.enqueue(
       (signal) => exchange(
         this.socketPath,
@@ -439,6 +467,7 @@ export class UnixSocketTransport {
         this.fingerprintGate,
       ),
       key,
+      options,
     );
   }
 
