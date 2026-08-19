@@ -4,6 +4,8 @@ import net from "node:net";
 import * as os from "node:os";
 import { join } from "node:path";
 import { fakeSocket, type FakeSocketResponse } from "./helpers/fake-socket.js";
+import { PresenceClient } from "../src/client.js";
+import { resolvePresenceConfig } from "../src/config.js";
 import {
   BoundedSocketQueue,
   PresenceTransportError,
@@ -16,7 +18,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()?.(); });
 
 async function fixture(
-  handler: (line: string) => FakeSocketResponse,
+  handler: (line: string) => FakeSocketResponse | Promise<FakeSocketResponse>,
   options?: { onConnection?: (socket: import("node:net").Socket) => void },
 ) {
   const dir = await fs.mkdtemp(join(os.tmpdir(), "presence-test-"));
@@ -256,6 +258,155 @@ describe("Unix socket transport", () => {
     await expect(first).resolves.toBe("replacement");
     expect(started).toEqual(["blocker", "replacement"]);
     await queue.close(50);
+  });
+  test("dispatches primary work ahead of an ordered optional feed queue", async () => {
+    const queue = new BoundedSocketQueue(3);
+    let release!: () => void;
+    const started: string[] = [];
+    const blocker = queue.enqueue(async () => {
+      started.push("blocker");
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "blocker";
+    });
+    await nextTurn();
+    const firstFeed = queue.enqueue(async () => { started.push("first-feed"); return "first-feed"; }, undefined, { displaceable: true });
+    const secondFeed = queue.enqueue(async () => { started.push("second-feed"); return "second-feed"; }, undefined, { displaceable: true });
+    const primary = queue.enqueue(async () => { started.push("primary"); return "primary"; });
+
+    release();
+    await Promise.all([blocker, firstFeed, secondFeed, primary]);
+    expect(started).toEqual(["blocker", "primary", "first-feed", "second-feed"]);
+    await queue.close(50);
+  });
+  test("evicts the newest saturated feed while retaining earlier feeds in FIFO order", async () => {
+    const queue = new BoundedSocketQueue(3);
+    let release!: () => void;
+    const started: string[] = [];
+    const blocker = queue.enqueue(async () => {
+      started.push("blocker");
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "blocker";
+    });
+    await nextTurn();
+    const firstFeed = queue.enqueue(async () => { started.push("first-feed"); return "first-feed"; }, undefined, { displaceable: true });
+    const secondFeed = queue.enqueue(async () => { started.push("second-feed"); return "second-feed"; }, undefined, { displaceable: true });
+    const newestFeed = queue.enqueue(async () => { started.push("newest-feed"); return "newest-feed"; }, undefined, { displaceable: true });
+    const primary = queue.enqueue(async () => { started.push("primary"); return "primary"; });
+
+    release();
+    await expect(newestFeed).rejects.toThrow("displaced by primary output");
+    await Promise.all([blocker, firstFeed, secondFeed, primary]);
+    expect(started).toEqual(["blocker", "primary", "first-feed", "second-feed"]);
+    await queue.close(50);
+  });
+  test("keeps the earliest ordered feed prefix from a startup-sized burst at maxQueue=1", async () => {
+    let releaseSessionStart!: () => void;
+    const sessionStartReleased = new Promise<void>((resolve) => { releaseSessionStart = resolve; });
+    const writes: string[] = [];
+    const path = await fixture(async (line) => {
+      writes.push(line);
+      if (!line.startsWith("{")) return "OK";
+
+      const request = JSON.parse(line) as { id: number; method: string; params: { event?: { hook_event_name?: string } } };
+      if (request.method === "feed.push" && request.params.event?.hook_event_name === "SessionStart") {
+        await sessionStartReleased;
+      }
+      const result = request.method === "system.capabilities"
+        ? { protocol: "cmux-socket", version: 2, methods: ["feed.push"] }
+        : {};
+      return JSON.stringify({ id: request.id, ok: true, result });
+    });
+    const transport = new UnixSocketTransport(path, 300, 1);
+    const client = new PresenceClient(
+      { workspaceId: "00000000-0000-4000-8000-000000000001", surfaceId: "00000000-0000-4000-8000-000000000002" },
+      transport,
+      { ...resolvePresenceConfig({}), maxQueue: 1, feed: true },
+    );
+    await client.initialize();
+
+    const sessionStart = client.feed("SessionStart", "session-1");
+    while (!writes.some((line) => line.includes('"hook_event_name":"SessionStart"'))) await nextTurn();
+    const feeds = [
+      client.feed("UserPromptSubmit", "session-1"),
+      client.feed("PreToolUse", "session-1", { callId: "call-1", name: "todo" }),
+      client.feed("PostToolUse", "session-1", { callId: "call-1", name: "todo" }),
+      ...Array.from({ length: 27 }, () => client.feed("UserPromptSubmit", "session-1")),
+      client.feed("Stop", "session-1"),
+    ];
+
+    releaseSessionStart();
+    await Promise.all([sessionStart, ...feeds]);
+    await client.close();
+
+    const feedRequests = writes
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as { method: string; params: { event?: unknown } })
+      .filter((request) => request.method === "feed.push");
+    expect(feedRequests.map((request) => request.params.event)).toEqual([
+      {
+        session_id: "session-1",
+        hook_event_name: "SessionStart",
+        _source: "pi",
+        workspace_id: "00000000-0000-4000-8000-000000000001",
+        surface_id: "00000000-0000-4000-8000-000000000002",
+      },
+      {
+        session_id: "session-1",
+        hook_event_name: "UserPromptSubmit",
+        _source: "pi",
+        workspace_id: "00000000-0000-4000-8000-000000000001",
+        surface_id: "00000000-0000-4000-8000-000000000002",
+      },
+    ]);
+    expect(writes.map((line) => line.startsWith("{") ? (JSON.parse(line) as { method: string }).method : line))
+      .toEqual(["system.capabilities", "feed.push", "feed.push"]);
+  });
+  test("dispatches each primary output ahead of a pending feed at maxQueue=1", async () => {
+    const primary = [
+      { command: "set_status", send: (client: PresenceClient) => client.status("state", "Ready", { icon: "circle", color: "#00aa00", priority: 1 }) },
+      { command: "set_progress", send: (client: PresenceClient) => client.progress(0.5, "Working") },
+      { command: "set_agent_lifecycle", send: (client: PresenceClient) => client.lifecycle("running") },
+    ];
+
+    for (const { command, send } of primary) {
+      let releaseBlocker!: () => void;
+      const blockerReleased = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+      const writes: string[] = [];
+      const path = await fixture(async (line) => {
+        writes.push(line);
+        if (line === "blocker") {
+          await blockerReleased;
+          return "OK";
+        }
+        if (!line.startsWith("{")) return "OK";
+
+        const request = JSON.parse(line) as { id: number; method: string };
+        const result = request.method === "system.capabilities"
+          ? { protocol: "cmux-socket", version: 2, methods: ["feed.push"] }
+          : {};
+        return JSON.stringify({ id: request.id, ok: true, result });
+      });
+      const transport = new UnixSocketTransport(path, 300, 1);
+      const client = new PresenceClient(
+        { workspaceId: "00000000-0000-4000-8000-000000000001", surfaceId: "00000000-0000-4000-8000-000000000002" },
+        transport,
+        { ...resolvePresenceConfig({}), maxQueue: 1, feed: true },
+      );
+      await client.initialize();
+
+      const blocker = transport.request("blocker\n");
+      while (!writes.includes("blocker")) await nextTurn();
+      const feed = client.feed("SessionStart", "session-1");
+      const output = send(client);
+      releaseBlocker();
+      await Promise.all([blocker, feed, output]);
+      await client.close();
+
+      expect(writes.map((line) => line.startsWith("{")
+        ? (JSON.parse(line) as { method: string }).method
+        : line.split(" ", 1)[0]))
+        .toEqual(["system.capabilities", "blocker", command]);
+    }
   });
   test("drains a request enqueued immediately after awaiting the previous request", async () => {
     const queue = new BoundedSocketQueue(1);

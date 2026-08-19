@@ -4,6 +4,7 @@
 
 ### 신뢰성
 
+- `BoundedSocketQueue`는 포화 시 primary 출력을 대기 feed보다 앞에 넣고 가장 최근의 displaceable feed만 교체하며, 남은 feed의 FIFO 순서를 유지합니다.
 - consumer-side `pi-presence:withdraw:v2`을 추가해 수락된 외부 source의 retained status를 철회하고, 공유 generation/sequence tombstone fence를 유지한 채 progress와 opt-in meta block을 다시 계산합니다. exact `subagent` remove는 pending terminal 집계를 무효화하고 보류된 local parent attention을 고정 fallback으로 복원합니다.
 - `settled` notification policy를 추가했습니다. 기본값은 계속 `background`이며, settled는 local success/error와 external error를 허용하고 generic external info/success는 억제합니다. 성공 부모 settlement와 exact `subagent` 성공 집계의 병합은 finalized local completion으로 허용합니다.
 - local Pi sidebar/notification을 canonical fixed wording으로 통일하고, terminal sidebar clear와 cmux notification retention의 소유권을 분리했습니다.
@@ -13,6 +14,7 @@
 
 ### 테스트
 
+- 포화된 queue에서 primary 출력이 가장 최근 feed를 교체하고, 앞선 feed들이 FIFO로 dispatch되는 회귀를 검증합니다.
 - shared V2 runtime의 strict DTO/receipt, fixed source strings, structured attention, terminal channel, withdrawal tombstone, exact status clear, progress/meta 재계산, `subagent` pending invalidation과 local fallback 복원을 검증합니다.
 - `settled` config trim/case, policy matrix·kill switch, canonical local formatter의 static/no-payload byte bound, idle settlement의 exactly-once local notification과 final sidebar clear를 검증합니다.
 - 실제 post-connect validation 중 unsolicited data/close의 hard gate, stale fingerprint lease의 late-release fence, runtime session churn/transport replacement의 공유 validation 상한, 연결 error/timeout·post-write timeout 뒤 queue 복구, 응답 없이 종료되는 소켓과 지연된 다수 status 정리 경로를 검증합니다.
@@ -20,6 +22,7 @@
 
 ### 문서
 
+- transport-state 다이어그램에 포화 queue의 primary 우선 삽입, 최신 feed 교체와 남은 feed FIFO 경로를 반영했습니다.
 - shared runtime dependency의 V2 fixed source strings, structured attention, live terminal channel, exact `consumer.activate` ready/replay order, withdrawal tombstone과 event-flow를 문서화합니다.
 - settled policy matrix와 merged finalized-local 예외, precedence, focus polling 부재와 cmux의 focused-banner/notification retention 소유권, canonical local wording·privacy boundary를 문서화합니다.
 - capability negotiation, 공식 hook 우선순위, usage delta 및 다이어그램·릴리스 이력을 문서화합니다.

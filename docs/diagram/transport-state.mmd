@@ -10,9 +10,18 @@ flowchart TB
     Closed -->|yes| RejectClosed[Reject:<br/>queue is closed]
     Closed -->|no| Coalesce{Same key already<br/>pending?}
     Coalesce -->|yes| Merge[Replace pending work,<br/>share existing promise<br/>latest-write-wins]
-    Coalesce -->|no| Bound{queue.length<br/>>= maxQueue?}
-    Bound -->|yes| RejectFull[Reject:<br/>queue is full, drop]
-    Bound -->|no| Push[Push pending,<br/>register key, start drain]
+    Coalesce -->|no| WorkType{Displaceable<br/>best-effort feed?}
+    WorkType -->|yes| FeedBound{queue.length<br/>>= maxQueue?}
+    FeedBound -->|yes| RejectFeedFull[Reject feed:<br/>queue is full]
+    FeedBound -->|no| FeedPush[Append feed FIFO<br/>after pending work]
+    WorkType -->|no: primary| PrimaryBound{queue.length<br/>>= maxQueue?}
+    PrimaryBound -->|no| PrimaryPush[Insert primary ahead of<br/>the first pending feed]
+    PrimaryBound -->|yes| DisplaceablePending{Pending displaceable<br/>feed exists?}
+    DisplaceablePending -->|yes| Evict[Evict newest pending feed,<br/>remove its key, reject its promise]
+    Evict --> PrimaryPush
+    DisplaceablePending -->|no| RejectPrimaryFull[Reject primary:<br/>queue is full; no feed to displace]
+    FeedPush --> Push[Register key,<br/>start drain]
+    PrimaryPush --> Push
   end
 
   Push --> Drain[Drain loop:<br/>shift next pending]
@@ -53,6 +62,6 @@ flowchart TB
     Race -->|timeout first| Abandon[abandon = true,<br/>abort active exchange,<br/>reject undispatched]
   end
 
-  class Push,Drain,Active,Write,Read,Ok core
-  class Enqueue,Closed,Coalesce,Merge,Bound,Before,Connect,Pending,After,CloseCall,MarkClosed,Race boundary
-  class RejectClosed,RejectFull,Changed,TooLarge,Incomplete,MultiLine,Failed,Poison,ImmediateAbort,Abandon,Settled,Idle boundary
+  class Push,FeedPush,PrimaryPush,Drain,Active,Write,Read,Ok core
+  class Enqueue,Closed,Coalesce,Merge,WorkType,FeedBound,PrimaryBound,DisplaceablePending,Evict,Before,Connect,Pending,After,CloseCall,MarkClosed,Race boundary
+  class RejectClosed,RejectFeedFull,RejectPrimaryFull,Changed,TooLarge,Incomplete,MultiLine,Failed,Poison,ImmediateAbort,Abandon,Settled,Idle boundary
