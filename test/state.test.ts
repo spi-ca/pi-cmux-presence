@@ -13,39 +13,75 @@ import { UsageTracker } from "../src/usage.js";
 import { isSafeSessionId } from "../src/validation.js";
 
 function v2() {
-  const events: PresenceEventV2[] = [];
-  const consumer = createPresenceConsumer({ id: "pi-cmux-presence" })!;
+  const consumers = new Map<string, NonNullable<ReturnType<typeof createPresenceConsumer>>>();
+  const activeConsumers = new Map<string, NonNullable<ReturnType<typeof createPresenceConsumer>>>();
+  const accepted = new Map<string, PresenceEventV2[]>();
+  const addConsumer = (id: "pi-cmux-presence" | "pi-herdr-presence") => {
+    const consumer = createPresenceConsumer({ id })!;
+    consumers.set(id, consumer);
+    accepted.set(id, []);
+    return consumer;
+  };
+  const activate = (id: "pi-cmux-presence" | "pi-herdr-presence") => {
+    const consumer = consumers.get(id)!;
+    // Register before activation so synchronous retained-state replay reaches
+    // this consumer, then remove it if registry activation fails.
+    activeConsumers.set(id, consumer);
+    const activated = consumer.activate();
+    if (!activated) activeConsumers.delete(id);
+    return activated;
+  };
+  const deactivate = (id: "pi-cmux-presence" | "pi-herdr-presence") => {
+    const consumer = consumers.get(id)!;
+    activeConsumers.delete(id);
+    return consumer.deactivate();
+  };
+  const consumer = addConsumer("pi-cmux-presence");
+  const events = accepted.get("pi-cmux-presence")!;
   const producer = createPresenceProducer({ source: "subagent", emit(name: string, payload: unknown) {
-    const accepted = consumer.accept(name, payload);
-    if (accepted) events.push(accepted);
+    for (const [id, activeConsumer] of activeConsumers) {
+      const event = activeConsumer.accept(name, payload);
+      if (event) accepted.get(id)!.push(event);
+    }
   } })!;
-  expect(consumer.activate()).toBe(true);
+  expect(activate("pi-cmux-presence")).toBe(true);
   expect(producer.activate()).toBe(true);
-  return { consumer, producer, events };
+  return { consumer, producer, events, accepted, addConsumer, activate, deactivate };
 }
 
 describe("V2 presence state", () => {
   test("uses shared consumer fences, source labels, and retained replay", () => {
-    const { consumer, producer, events } = v2();
-    expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "running", subagents: { running: 1, cancelling: 0, queued: 2, completed: 3, failed: 0, cancelled: 0, omitted: 0 } })).toBe(true);
-    const event = events[0]!;
-    expect("state" in event && adaptPresenceState(event)).toMatchObject({ source: { id: "subagent", label: "Subagents", kind: "agent-group" }, counts: { active: 1, queued: 2, completed: 3 } });
-    expect(consumer.accept(EVENT_NAMES.state, event)).toBeUndefined();
-    producer.deactivate();
-    consumer.deactivate();
+    const { consumer, producer, events, accepted, addConsumer, activate, deactivate } = v2();
+    const late = addConsumer("pi-herdr-presence");
+    try {
+      expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "running", subagents: { running: 1, cancelling: 0, queued: 2, completed: 3, failed: 0, cancelled: 0, omitted: 0 } })).toBe(true);
+      const event = events[0]!;
+      expect("state" in event && adaptPresenceState(event)).toMatchObject({ source: { id: "subagent", label: "Subagents", kind: "agent-group" }, counts: { active: 1, queued: 2, completed: 3 } });
+      expect(consumer.accept(EVENT_NAMES.state, event)).toBeUndefined();
+
+      expect(activate("pi-herdr-presence")).toBe(true);
+      const replayed = accepted.get("pi-herdr-presence")!;
+      expect(replayed).toHaveLength(1);
+      expect(replayed[0]).toMatchObject({ state: "running", source: "subagent", sessionEpoch: late.ready.sessionEpoch });
+    } finally {
+      producer.deactivate(); deactivate("pi-cmux-presence"); deactivate("pi-herdr-presence");
+    }
   });
 
   test("does not replay terminals and keeps terminal adapters quiet and non-authoritative", () => {
-    const { consumer, producer, events } = v2();
-    const late = createPresenceConsumer({ id: "pi-herdr-presence" })!;
+    const { producer, events, accepted, addConsumer, activate, deactivate } = v2();
+    addConsumer("pi-herdr-presence");
     try {
       expect(producer.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" })).toBe(true);
       const terminal = events[0]!;
       expect("eventId" in terminal && adaptPresenceTerminal(terminal)).toMatchObject({ source: { id: "subagent" }, state: "error", attention: "none", counts: { failed: 0 } });
-      expect(late.activate()).toBe(true);
+
+      // The late consumer activates after the live terminal and receives none.
+      expect(activate("pi-herdr-presence")).toBe(true);
+      expect(accepted.get("pi-herdr-presence")).toEqual([]);
       expect(events).toHaveLength(1);
     } finally {
-      producer.deactivate(); consumer.deactivate(); late.deactivate();
+      producer.deactivate(); deactivate("pi-cmux-presence"); deactivate("pi-herdr-presence");
     }
   });
 
