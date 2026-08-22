@@ -45,12 +45,13 @@ test/notification-policy.test.ts — exact `subagent` cumulative terminal 판정
 test/runtime-notification-acceptance.test.ts — 실제 V2 producer→bus→consumer와 fake Unix socket으로 terminal exactly-once, withdrawal, retained-quiet, source failover와 notification/presentation 경계를 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
 test/official-hook.test.ts — marker/부재/override와 non-regular·64 KiB 초과 source의 bounded probe 테스트
-test/runtime-resolution.test.ts — startup resolver, 공식 hook probe deadline·epoch fence, runtime 공유 fingerprint lease gate의 replacement fence 테스트
+test/runtime-resolution.test.ts — startup resolver, 공식 hook probe deadline·epoch fence, awaitable shutdown observer와 runtime 공유 fingerprint lease gate의 replacement fence 테스트
+test/shutdown-process.test.ts — 실제 단기 Bun child process가 fake Unix socket의 shutdown clear 뒤 정상 종료하는 통합 테스트
 test/socket-only.test.ts  — production 소스에 process 실행 API가 없음을 확인하는 정적 가드 테스트
 test/state.test.ts        — shared V2 fence/terminal projection, todo adapter, identity, usage 상태 테스트
 test/text.test.ts         — canonical local turn 및 exact interaction waiting fixed/private presentation, text 정규화·축약과 byte-bound 테스트
 test/transport.test.ts    — UnixSocketTransport 연결 lifecycle과 BoundedSocketQueue 테스트
-test/helpers/             — 테스트 전용 in-memory fake Unix 소켓 서버(`fake-socket.ts`)
+test/helpers/             — 테스트 전용 in-memory fake Unix 소켓 서버와 child-process fixture
 docs/                     — 주제별 문서
 docs/diagram/             — Mermaid 원본, 흰색 배경 SVG·2x PNG 렌더 결과, 공유 mermaid-config.json·puppeteer-config.json
 docs/guidelines/          — 벤더된 문서·에이전트 지침 작성 가이드(`a-complete-guide-to-agents-md.md`, `karpathy-guidelines.md`)
@@ -73,7 +74,7 @@ bun run diagram:render
 - cmux CLI나 다른 프로세스를 실행하지 않고 Unix 소켓만 사용합니다.
 - 유효한 `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`와 안전한 소켓이 없으면 대상·포커스를 추측하지 않습니다.
 - V2 선택 메서드는 `system.capabilities`가 광고한 정확한 메서드만 호출합니다. V1 응답은 정확히 `OK`여야 합니다.
-- observer 오류와 잘못된 host session ID는 Pi 작업 실패가 아니라 해당 presence 비활성화 또는 출력 유실로 끝나야 합니다.
+- observer 오류와 잘못된 host session ID는 Pi 작업 실패가 아니라 해당 presence 비활성화 또는 출력 유실로 끝나야 합니다. session start는 detached로 유지하지만 정상 `session_shutdown`은 runtime의 기존 bounded cleanup promise를 반환·await하고 오류를 삼킵니다.
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. startup 소켓 경로 검증은 client ownership 전에 request timeout으로 제한하고 session epoch abort와 race하므로 replacement/shutdown이 느린 filesystem 작업을 기다리지 않습니다. deadline/abort 후에도 남은 resolver는 settle 전까지 독점되어 다음 epoch가 새 filesystem 검증을 시작할 수 없고, stale 결과는 재사용하지 않습니다. transport는 실제 post-connect fingerprint가 미해결인 동안의 request write 전 data/end/close/error만 response로 수락하지 않고 즉시 fail-close합니다. runtime-owned fingerprint lease gate는 replacement를 포함한 모든 runtime transport에서 미해결 filesystem validation 하나만 허용하며 stale lease가 settle될 때까지 새 validation을 거부하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 만들어 같은 보장을 유지합니다. 연결 전 connect error/timeout과 post-write 응답 timeout은 현재 요청만 실패시키고 queue를 close하지 않습니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다. owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 local presentation을 추가하면 style·priority와 privacy/byte-bound 테스트를 함께 갱신합니다.
@@ -86,10 +87,11 @@ bun run diagram:render
 - local Pi sidebar/notification은 canonical fixed summary만 사용합니다. assistant response body·preview, prompt, raw error, path, tool argument/output을 새 전송 text로 추가하지 않으며 terminal sidebar는 `finalClearMs` 뒤 clear합니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
 - input-required의 고정 `Pi needs your input` 표시는 shared contract가 유효한 해당 input state에만 적용합니다. label·prompt 등 producer payload를 새 cmux text에 넣지 않습니다. 새 attention만 기존 gate를 따르고 retained 표시 갱신은 status-only입니다. 이 표시를 모든 Pi input wait의 감지나 producer lifecycle/실행/취소 authority로 확장하지 않습니다.
 - feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. feed의 detached startup queue만 32 edge로 bounded하며 overflow는 그 epoch의 feed를 fail-close해 출력하지 않습니다. readiness는 snapshot을 한 JavaScript turn 안에 client의 bounded socket queue로 순서 제출하고 local queue를 끝내며, 이후 edge는 local buffering 없이 client queue로 직접 보냅니다. transport queue에서 feed는 key로 병합하지 않는 FIFO·낮은 우선순위 항목입니다. 포화하면 새 feed는 버리되, primary 출력은 대기 feed보다 앞서거나 가장 최근 feed를 교체할 수 있습니다. generic presence update나 `pi-subagent` producer를 추가해도 이 기능이나 live cmux mutation/focus 제어를 암묵적으로 활성화하지 않습니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
+- awaited shutdown은 정상 hook 경로만 보호합니다. crash·`SIGKILL` 뒤 stale status를 처리하는 persisted cross-process reconciliation은 현재 없으며, lease/TTL 또는 owner 기반 recovery는 향후 설계 후보이지 구현 불변 조건이 아닙니다.
 
 ## 검증 범위
 
-`bun run ci`는 설정 파싱, V1/V2 cmux codec과 multibyte 경계, capability gate, shared presence의 cmux projection·clear·presentation policy, exact `subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, privacy byte bound, todo ID 고유성, invalid session fail-closed, 공식 hook precedence, socket 검증·timeout·queue 복구, runtime replacement·teardown race, keyed queue 병합과 낮은 우선순위 feed 교체를 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 terminal aggregation, fixed/private socket text, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence와 notification RPC failure 격리를 추가로 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
+`bun run ci`는 설정 파싱, V1/V2 cmux codec과 multibyte 경계, capability gate, shared presence의 cmux projection·clear·presentation policy, exact `subagent` cumulative terminal·notification/flash policy와 고정 deadline 산술, privacy byte bound, todo ID 고유성, invalid session fail-closed, 공식 hook precedence, socket 검증·timeout·queue 복구, runtime replacement·teardown race, keyed queue 병합과 낮은 우선순위 feed 교체를 실행합니다. `test/runtime-notification-acceptance.test.ts`는 manual clock과 fake Unix socket으로 terminal aggregation, fixed/private socket text, notification/flash capability 독립성, aggregate privacy canary, replacement/shutdown callback fence와 notification RPC failure 격리를 추가로 확인합니다. `test/shutdown-process.test.ts`는 실제 단기 Bun child process의 정상 종료가 fake Unix socket에서 `clear_status`를 받은 뒤에만 일어나는지 확인합니다. `bun pm pack --dry-run`은 패키징 범위를 확인합니다.
 
 이 검증은 consumer 쪽 cmux projection·presentation policy, 검토한 exact child-profile suppression, fake Unix socket과 정적 status-key namespace까지만 다룹니다. 실행 중인 `pi-subagent` 또는 `pi-cmux`, 두 package의 load order, root aggregate/child `inherit` 공존, cmux 서버와의 live 연동은 검증하지 않습니다. 따라서 실제 cmux 서버의 버전·capability·hook 동작과 live 호환성은 자동 테스트가 보장하지 않습니다. 변경 후 실제 환경에서 확인할 항목은 UUID/소켓 안전성, capability advertisement, 공식 hook precedence, 필요한 opt-in flag입니다.
 
