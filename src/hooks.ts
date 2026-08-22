@@ -15,8 +15,8 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
     settleOnAgentEnd = true;
   }
 
-  // Lifecycle observers must never make Pi await best-effort filesystem/socket work.
-  // The runtime establishes its epoch synchronously, then fences optional output internally.
+  // Startup remains detached: the runtime establishes its epoch synchronously,
+  // then fences optional output internally.
   pi.on("session_start", (_event, context) => { void runtime.startSession(context).catch(() => {}); });
   pi.on("agent_start", () => runtime.handleAgentStart());
   pi.on("turn_start", () => runtime.handleTurnStart());
@@ -30,7 +30,7 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
   pi.on("tool_execution_end", (event) => runtime.handleToolExecutionEnd(event));
   pi.on("tool_result", (event) => runtime.handleToolResult(event));
   pi.on("session_info_changed", (event) => runtime.handleSessionInfoChanged(event));
-  // Teardown is likewise detached: shutdown synchronously fences the epoch before
-  // its bounded cmux cleanup continues in the background.
-  pi.on("session_shutdown", () => { void runtime.shutdownSession().catch(() => {}); });
+  // Let normal process shutdown await the runtime's bounded cleanup, but keep
+  // observer failures best-effort so presence can never fail Pi work.
+  pi.on("session_shutdown", () => runtime.shutdownSession().catch(() => {}));
 }

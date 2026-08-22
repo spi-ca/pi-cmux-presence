@@ -1070,28 +1070,71 @@ test("replacement callback returns before its fenced capability initialization",
 		await c.close();
 	}
 });
-test("shutdown callback returns immediately while teardown is stalled", async () => {
-	let silent = false;
+test("shutdown callback awaits the aggregate cleanup deadline", async () => {
+	let blockClear = false;
 	const c = await cmux([], async (l) => {
-		if (silent && l.startsWith("clear_status "))
-			await new Promise<void>(() => {});
+		if (blockClear && l.startsWith("clear_status ")) {
+			await new Promise<never>(() => {});
+		}
 		return undefined;
 	});
 	try {
+		process.env.PI_CMUX_PRESENCE_TIMEOUT_MS = "150";
 		const host = pi();
+		const piProducer = producer(host, "pi");
 		extension(host.api as never);
 		await host.life("session_start", {}, ctx("deadline"));
-		const p = producer(host, "interaction");
-		p.publishState(interaction());
-		await waitFor(() => c.lines.some((l) => l.startsWith("set_status ")));
-		silent = true;
+		const interactionProducer = producer(host, "interaction");
+		const subagentProducer = producer(host, "subagent");
+		piProducer.publishState({
+			version: 2,
+			generation: 0,
+			sequence: 0,
+			source: "pi",
+			state: "running",
+		});
+		interactionProducer.publishState(interaction());
+		subagentProducer.publishState(subagent());
+		await waitFor(
+			() => c.lines.filter((l) => l.startsWith("set_status ")).length >= 3,
+		);
+		blockClear = true;
+		piProducer.withdraw({
+			version: 2,
+			generation: 0,
+			sequence: 1,
+			source: "pi",
+		});
+		interactionProducer.withdraw({
+			version: 2,
+			generation: 0,
+			sequence: 1,
+			source: "interaction",
+		});
+		subagentProducer.withdraw({
+			version: 2,
+			generation: 0,
+			sequence: 1,
+			source: "subagent",
+		});
 		const shutdown = host.hooks.get("session_shutdown")?.[0];
 		expect(shutdown).toBeDefined();
 		const start = performance.now();
-		expect(shutdown!({})).toBeUndefined();
-		expect(performance.now() - start).toBeLessThan(50);
+		const result = shutdown!({});
+		expect(result).toBeInstanceOf(Promise);
+		let settled = false;
+		const completion = Promise.resolve(result).then(() => {
+			settled = true;
+		});
 		await waitFor(() => c.lines.some((line) => line.startsWith("clear_status ")));
-		p.deactivate();
+		expect(settled).toBe(false);
+		await completion;
+		const elapsed = performance.now() - start;
+		expect(elapsed).toBeGreaterThanOrEqual(650);
+		expect(elapsed).toBeLessThan(1_500);
+		piProducer.deactivate();
+		interactionProducer.deactivate();
+		subagentProducer.deactivate();
 	} finally {
 		await c.close();
 	}
