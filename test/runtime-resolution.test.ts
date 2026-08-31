@@ -102,7 +102,7 @@ class ManualRuntimeClock {
   }
 }
 
-test("lifecycle callbacks return immediately while a socket resolver is stalled", async () => {
+test("startup stays detached while shutdown remains awaitable with a stalled resolver", async () => {
   const previousWorkspace = process.env.CMUX_WORKSPACE_ID;
   const previousSurface = process.env.CMUX_SURFACE_ID;
   process.env.CMUX_WORKSPACE_ID = "00000000-0000-4000-8000-000000000011";
@@ -155,7 +155,9 @@ test("lifecycle callbacks return immediately while a socket resolver is stalled"
       localPresentation: Map<string, { state: string }>;
     }).localPresentation.get("pi")?.state).toBe("success");
 
-    expect(shutdown!({})).toBeUndefined();
+    const shutdownResult = shutdown!({});
+    expect(shutdownResult).toBeInstanceOf(Promise);
+    await shutdownResult;
     releaseResolver?.(null);
     await nextTurn();
   } finally {
@@ -166,6 +168,23 @@ test("lifecycle callbacks return immediately while a socket resolver is stalled"
     if (previousSurface === undefined) delete process.env.CMUX_SURFACE_ID;
     else process.env.CMUX_SURFACE_ID = previousSurface;
   }
+});
+
+test("shutdown observer errors are swallowed after the awaitable hook settles", async () => {
+  const hooks = new Map<string, Array<(event: unknown, context?: unknown) => unknown>>();
+  const api = {
+    ...fakePi([]),
+    on(name: string, handler: (event: unknown, context?: unknown) => unknown) {
+      hooks.set(name, [...(hooks.get(name) ?? []), handler]);
+    },
+  };
+  registerPresenceHooks(api as never, {
+    shutdownSession: async () => { throw new Error("observer cleanup failed"); },
+  } as never);
+
+  const result = hooks.get("session_shutdown")?.[0]?.({});
+  expect(result).toBeInstanceOf(Promise);
+  await result;
 });
 
 test("a second agent start invalidates a detached startup terminal from the first run", async () => {
