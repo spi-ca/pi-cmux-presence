@@ -92,6 +92,8 @@ type DetachedSession = {
   officialHook: boolean;
   statusScope: string | undefined;
   retainedEvents: PresenceUpdate[];
+  /** Native UI waiting is local-only but still owns the interaction status key. */
+  nativePromptWaiting: boolean;
   /** Latest unacknowledged clear attempt by status key; bounded by source fences. */
   pendingStatusClears: Map<string, StatusClearAttempt>;
 };
@@ -125,6 +127,11 @@ type SuppressedParentAttention = {
   readonly attention: "info" | AttentionKind;
   readonly completed: number;
   readonly failed: number;
+};
+
+type NativePrompt = {
+  readonly sessionEpoch: number;
+  readonly sessionId: string;
 };
 
 type GenericAttentionSemantic = {
@@ -258,6 +265,14 @@ export class PresenceRuntime {
   private attentionOutputReady = false;
   /** One current local terminal is enough to reconcile a delayed session setup. */
   private pendingLocalTerminalAttention: PendingLocalTerminalAttention | null = null;
+  /** Synchronous, local-only state for Pi's blocking TUI prompt lifecycle. */
+  private nativePrompt: NativePrompt | null = null;
+  /** One native prompt may defer its fixed input attention until owned output is ready. */
+  private pendingNativePromptAttention = false;
+  /** A combined native/V2 input wait creates at most one native attention lifecycle. */
+  private interactionAttentionDispatched = false;
+  /** A native prompt changed lifecycle ownership; restore only once the combined wait resolves. */
+  private nativePromptLifecycleWaiting = false;
   /** Opt-in lifecycle edges accepted before owned cmux output is ready. */
   private pendingFeedEdges: QueuedFeedEdge[] = [];
   /** A startup overflow drops this epoch's feed rather than emitting a partial transcript. */
@@ -307,9 +322,21 @@ export class PresenceRuntime {
       }
       const removed = this.registry.remove(accepted.source);
       if (accepted.source === "subagent") this.invalidateSubagentNotifications();
-      this.genericAttentionBySource.delete(accepted.source);
-      this.discardPendingExternalAttention(accepted.source);
-      if (removed) this.clearRemovedStatus(this.statusKey(removed.source.id));
+      // A withdrawn V2 ask_user can still share the active native prompt's
+      // fixed input lifecycle. Preserve its queued, rate-limited attention
+      // (and semantic dedupe) until that combined wait resolves.
+      const nativeInteractionStillWaiting = accepted.source === "interaction"
+        && this.hasNativePromptWaiting();
+      if (!nativeInteractionStillWaiting) {
+        this.genericAttentionBySource.delete(accepted.source);
+        this.discardPendingExternalAttention(accepted.source);
+      }
+      if (removed?.source.id === "interaction") {
+        if (nativeInteractionStillWaiting) this.renderInteractionWaiting();
+        else this.resolveInteractionWaiting();
+      } else if (removed) {
+        this.clearRemovedStatus(this.statusKey(removed.source.id));
+      }
       this.renderProgress();
       if (!this.officialHook && this.config.metaBlock) void this.client?.meta(this.metadata());
     } catch {
@@ -430,6 +457,7 @@ export class PresenceRuntime {
       this.attentionOutputReady = true;
       this.dispatchDeferredSubagentAttention();
       this.dispatchSuppressedParentAttention(this.parentRunRevision);
+      this.dispatchPendingNativePromptAttention();
       this.dispatchPendingFeedEdges();
     }
 
@@ -437,6 +465,7 @@ export class PresenceRuntime {
     // before asynchronous cmux setup. Render retained state once without
     // replaying generic attention; a local terminal is reconciled below.
     this.renderRetainedSnapshots();
+    this.renderInteractionWaiting();
     this.dispatchDeferredFinalClear();
     this.dispatchPendingLocalTerminalAttention();
 
@@ -487,14 +516,55 @@ export class PresenceRuntime {
     this.terminal = "success";
     this.updateContextUsage();
     this.publish("running");
-    if (!this.officialHook && this.config.nativeLifecycle) {
-      void this.client?.lifecycle("running");
-    }
+    this.syncNativePromptLifecycle();
   }
 
   handleTurnStart(): void {
     this.activateLocalProducers();
     if (this.sessionId && this.active) this.updateContextUsage();
+  }
+
+  /**
+   * Observe only Pi's native blocking TUI prompt lifecycle. Event title and
+   * kind are intentionally neither retained nor rendered.
+   */
+  handleUiPromptStart(_event: unknown, context: unknown): void {
+    const sessionId = this.tuiSessionId(context);
+    if (!sessionId || !this.isCurrent(this.sessionEpoch, sessionId)) return;
+    if (this.nativePrompt?.sessionEpoch === this.sessionEpoch
+      && this.nativePrompt.sessionId === sessionId) return;
+
+    // A V2 ask_user alert already emitted for this same retained wait remains
+    // its single attention edge after native ctx.ui.custom begins.
+    if (this.hasV2InteractionWaiting()
+      && this.genericAttentionBySource.get("interaction")?.interactionWaiting) {
+      this.interactionAttentionDispatched = true;
+    }
+    this.nativePrompt = { sessionEpoch: this.sessionEpoch, sessionId };
+    this.nativePromptLifecycleWaiting = true;
+    this.publish("waiting");
+    this.renderInteractionWaiting();
+    this.requestNativePromptAttention();
+    this.syncNativePromptLifecycle();
+  }
+
+  /** End only the exact TUI session's synchronous native prompt state. */
+  handleUiPromptEnd(_event: unknown, context: unknown): void {
+    const prompt = this.nativePrompt;
+    const sessionId = this.tuiSessionId(context);
+    if (!prompt || !sessionId
+      || prompt.sessionEpoch !== this.sessionEpoch
+      || prompt.sessionId !== sessionId
+      || !this.isCurrent(prompt.sessionEpoch, sessionId)) return;
+
+    this.nativePrompt = null;
+    if (this.hasInteractionWaiting()) {
+      // ask_user may still own the same user-input wait. Keep its fixed status,
+      // queued alert, and idle lifecycle until that retained state resolves.
+      this.renderInteractionWaiting();
+      return;
+    }
+    this.resolveInteractionWaiting();
   }
 
   handleMessageEnd(event: unknown): void {
@@ -634,6 +704,7 @@ export class PresenceRuntime {
     this.statusScope = undefined;
     this.attentionOutputReady = false;
     this.pendingLocalTerminalAttention = null;
+    this.resetNativePromptState();
     this.resetPendingFeedEdges();
   }
 
@@ -644,6 +715,7 @@ export class PresenceRuntime {
       officialHook: this.officialHook,
       statusScope: this.statusScope,
       retainedEvents: this.registry.snapshot(),
+      nativePromptWaiting: this.nativePrompt !== null,
       pendingStatusClears: this.pendingStatusClears,
     };
     this.client = null;
@@ -679,11 +751,117 @@ export class PresenceRuntime {
     this.statusScope = undefined;
     this.attentionOutputReady = false;
     this.pendingLocalTerminalAttention = null;
+    this.resetNativePromptState();
     this.resetPendingFeedEdges();
   }
 
   private isCurrent(epoch: number, sessionId: string): boolean {
     return epoch === this.sessionEpoch && sessionId === this.sessionId;
+  }
+
+  /** UI prompt events are meaningful only in Pi's native TUI and current session. */
+  private tuiSessionId(context: unknown): string | null {
+    if (typeof context !== "object" || context === null
+      || (context as { mode?: unknown }).mode !== "tui") return null;
+    return sessionIdFromContext(context);
+  }
+
+  private hasNativePromptWaiting(): boolean {
+    return this.nativePrompt?.sessionEpoch === this.sessionEpoch
+      && this.nativePrompt.sessionId === this.sessionId;
+  }
+
+  private hasV2InteractionWaiting(): boolean {
+    const interaction = this.registry.get("interaction");
+    return interaction !== undefined && isInteractionWaiting(interaction);
+  }
+
+  /** The fixed input status is owned while either native or V2 wait remains. */
+  private hasInteractionWaiting(): boolean {
+    return this.hasNativePromptWaiting() || this.hasV2InteractionWaiting();
+  }
+
+  private renderInteractionWaiting(): void {
+    if (!this.hasInteractionWaiting()) return;
+    const presentation = formatInteractionWaitingPresentation(this.config.maxLabelChars);
+    void this.client?.status(
+      this.statusKey("interaction"),
+      presentation.sidebar,
+      PRESENCE_STATE_STYLES.waiting,
+    );
+  }
+
+  /** A native prompt is the source of one fixed input attention, never its text. */
+  private requestNativePromptAttention(): void {
+    if (this.interactionAttentionDispatched || this.pendingNativePromptAttention) return;
+    if (!this.attentionOutputReady) {
+      this.pendingNativePromptAttention = true;
+      return;
+    }
+    this.dispatchNativePromptAttention();
+  }
+
+  private dispatchNativePromptAttention(): void {
+    if (!this.hasInteractionWaiting()
+      || this.interactionAttentionDispatched
+      || !this.attentionOutputReady) return;
+    this.pendingNativePromptAttention = false;
+    this.interactionAttentionDispatched = true;
+    const presentation = formatInteractionWaitingPresentation(this.config.maxLabelChars);
+    const notify = !this.config.suppressNativeNotifications && shouldNotifyAttention(
+      this.config.notificationPolicy,
+      this.config.notifications,
+      "info",
+      "external",
+    );
+    const flash = !this.config.suppressNativeFlash && shouldFlashAttention(
+      this.config.flashPolicy,
+      this.config.flash,
+      this.config.notificationPolicy,
+      "info",
+      "external",
+    );
+    this.enqueueExternalAttention(
+      "interaction",
+      "input",
+      "info",
+      presentation.title,
+      presentation.body,
+      notify,
+      flash,
+    );
+  }
+
+  /** Clear the fixed status and restore Pi only after both wait sources resolve. */
+  private resolveInteractionWaiting(): void {
+    if (this.hasInteractionWaiting()) return;
+    this.clearRemovedStatus(this.statusKey("interaction"));
+    this.discardPendingExternalInputAttention("interaction");
+    this.pendingNativePromptAttention = false;
+    this.interactionAttentionDispatched = false;
+    this.genericAttentionBySource.delete("interaction");
+    if (this.nativePromptLifecycleWaiting) {
+      this.nativePromptLifecycleWaiting = false;
+      this.publish(this.active ? "running" : "idle");
+      this.syncNativePromptLifecycle();
+    }
+  }
+
+  private dispatchPendingNativePromptAttention(): void {
+    if (!this.pendingNativePromptAttention) return;
+    this.dispatchNativePromptAttention();
+  }
+
+  private syncNativePromptLifecycle(): void {
+    if (this.officialHook || !this.config.nativeLifecycle) return;
+    void this.client?.lifecycle(this.nativePromptLifecycleWaiting ? "idle" : this.active ? "running" : "idle");
+  }
+
+  private resetNativePromptState(): void {
+    this.nativePrompt = null;
+    this.pendingNativePromptAttention = false;
+    this.interactionAttentionDispatched = false;
+    this.nativePromptLifecycleWaiting = false;
   }
 
   /**
@@ -766,7 +944,7 @@ export class PresenceRuntime {
   private async initializeOptionalIntegrations(sessionId: string): Promise<void> {
     if (!this.officialHook && this.config.nativeLifecycle) {
       void this.client?.setPiPid();
-      void this.client?.lifecycle(this.active ? "running" : "idle");
+      this.syncNativePromptLifecycle();
     }
 
     if (!this.officialHook && this.config.autoTitle) {
@@ -842,10 +1020,14 @@ export class PresenceRuntime {
     const structuredSubagentFailure = exactSubagent
       && level === "error"
       && event.attentionReason === "failure";
+    // Native and V2 ask_user waiting share one fixed attention lifecycle. A
+    // V2 edge that overlaps ctx.ui.custom must not create a second alert.
+    if (interactionPresentation && this.nativePromptLifecycleWaiting) {
+      if (level && this.attentionOutputReady) this.requestNativePromptAttention();
     // Structured subagent state remains generic attention and never derives a
     // terminal count. A failure gets one short chance to join its matching
     // explicit terminal; blocked state stays an independent generic alert.
-    if (!exactSubagent || interactionPresentation || level === "error") {
+    } else if (!exactSubagent || level === "error") {
       // Local state snapshots are deliberately quiet. A deferred parent
       // suppression belongs to the following explicit local terminal edge.
       // Official hooks already own local completion attention. Do not consume
@@ -1969,6 +2151,9 @@ export class PresenceRuntime {
         const retainedStatusKeys = new Set(
           detached.retainedEvents.map((event) => presenceStatusKey(event.source.id, detached.statusScope)),
         );
+        if (detached.nativePromptWaiting) {
+          retainedStatusKeys.add(presenceStatusKey("interaction", detached.statusScope));
+        }
         for (const [key, attempt] of detached.pendingStatusClears) {
           let acknowledged = false;
           if (!expired) {

@@ -51,6 +51,36 @@ test("forged and replayed handles cannot accept an otherwise valid payload", () 
   producer.deactivate(); consumer.deactivate();
 });
 
+test("terminal receipts are live-only across consumer reactivation", () => {
+  const consumer = createPresenceConsumer({ id: "pi-cmux-presence" })!;
+  const accepted: unknown[] = [];
+  let stale: unknown;
+  let deliveries = 0;
+  const producer = createPresenceProducer({ source: "subagent", emit: (name: string, payload: unknown) => {
+    if (deliveries++ === 0) {
+      // Reactivation cannot replay a terminal, and invalidates its in-flight
+      // delivery receipt before the original callback can accept it.
+      expect(consumer.deactivate()).toBe(true);
+      expect(consumer.activate()).toBe(true);
+      stale = consumer.accept(name, payload);
+      return;
+    }
+    const event = consumer.accept(name, payload);
+    if (event) accepted.push(event);
+  } })!;
+  expect(consumer.activate()).toBe(true);
+  expect(producer.activate()).toBe(true);
+  expect(producer.publishTerminal({ version: 2, generation: 0, sequence: 0, source: "subagent", eventId: 0, outcome: "completed" })).toBe(true);
+  expect(stale).toBeUndefined();
+  expect(deliveries).toBe(1);
+
+  // Only a fresh live terminal gets a receipt for the reactivated consumer.
+  expect(producer.publishTerminal({ version: 2, generation: 0, sequence: 1, source: "subagent", eventId: 1, outcome: "completed" })).toBe(true);
+  expect(accepted).toHaveLength(1);
+  expect(accepted[0]).toMatchObject({ eventId: 1, sessionEpoch: consumer.ready.sessionEpoch });
+  producer.deactivate(); consumer.deactivate();
+});
+
 test("terminal delivery is live-only and not retained for a replacement consumer", () => {
   const activeConsumers = new Set<NonNullable<ReturnType<typeof createPresenceConsumer>>>();
   const accepted = new Map<NonNullable<ReturnType<typeof createPresenceConsumer>>, unknown[]>();

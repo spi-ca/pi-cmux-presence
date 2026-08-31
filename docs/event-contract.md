@@ -12,9 +12,9 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 이 패키지가 고정한 의존성 tag의 문서가 shared presence 계약의 유일한 기준입니다.
 
-- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md) — 채널과 strict DTO
-- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md) — producer/consumer activation과 retained state
-- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/terminal-batch.md) — live terminal batching
+- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md) — 채널과 strict DTO
+- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md) — producer/consumer activation과 retained state
+- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md) — live terminal batching
 
 공유 protocol의 parser, registry, receipt, replay, source occupancy와 ordering fence는
 이 저장소의 cmux 정책이 아닙니다. 해당 의미를 바꾸는 변경은 이 consumer가 아니라

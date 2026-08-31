@@ -20,6 +20,10 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
   pi.on("session_start", (_event, context) => { void runtime.startSession(context).catch(() => {}); });
   pi.on("agent_start", () => runtime.handleAgentStart());
   pi.on("turn_start", () => runtime.handleTurnStart());
+  // Pi 0.84.4 emits these only around blocking native UI prompts. The runtime
+  // validates the TUI context and session fence synchronously.
+  pi.on("ui_prompt_start", (event, context) => runtime.handleUiPromptStart(event, context));
+  pi.on("ui_prompt_end", (event, context) => runtime.handleUiPromptEnd(event, context));
   pi.on("message_end", (event) => runtime.handleMessageEnd(event));
   pi.on("agent_end", (event) => {
     runtime.handleAgentEnd(event);

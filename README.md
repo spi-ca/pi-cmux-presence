@@ -6,7 +6,7 @@ Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상
 
 ## 설치
 
-`package.json`의 Pi peer dependency는 optional `*`이므로 설치 가능한 Pi 최소 버전을 메타데이터로 강제하지 않습니다. 개발 의존성은 `^0.82.0`이고 현재 `bun.lock`은 `0.82.1`을 해석하지만, 실제 사용하는 Pi와의 호환성은 별도로 확인해야 합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
+`package.json`의 Pi peer dependency는 optional `*`이므로 설치 가능한 Pi 최소 버전을 메타데이터로 강제하지 않습니다. 개발 의존성과 현재 `bun.lock` 해석 버전은 exact `0.84.4`이지만, 실제 사용하는 Pi와의 호환성은 별도로 확인해야 합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
 
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
@@ -32,7 +32,7 @@ pi install -l git:github.com/spi-ca/pi-cmux-presence@v0.1.0
 개발 중에는 현재 디렉터리를 로컬 패키지로 설치할 수 있습니다. Pi는 경로를 복사하지 않고 참조합니다.
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run ci
 pi install /absolute/path/to/pi-cmux-presence
 # 프로젝트 범위 로컬 설치
@@ -80,7 +80,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 ## Shared presence contract
 
-공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
+공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
 
 ## 개인정보와 전송 범위
 

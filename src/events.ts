@@ -29,6 +29,7 @@ export class PresenceStateRegistry {
     this.values.delete(sourceId);
     return removed;
   }
+  get(sourceId: string): PresenceUpdate | undefined { return this.values.get(sourceId); }
   snapshot(): PresenceUpdate[] { return [...this.values.values()].sort((left, right) => left.source.label.localeCompare(right.source.label)); }
 }
 

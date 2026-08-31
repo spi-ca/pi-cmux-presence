@@ -40,7 +40,7 @@ notification 정책은 다음과 같습니다.
 
 기본값은 계속 `background`이며 `settled`는 명시 opt-in입니다. 여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지는 focus polling을 하지 않고 신뢰할 수 있는 read-only focus capability도 사용하지 않습니다. focused surface의 banner를 보일지 억제할지는 cmux가 소유합니다.
 
-유효한 shared input-required presence는 고정 표시 `Pi needs your input`으로 투영합니다. 새 attention만 기존 gate를 따르므로 policy가 허용해도 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. retained 표시 갱신은 status-only입니다. 이 동작은 새 환경 변수·capability를 만들지 않으며 모든 Pi input wait의 감지나 producer lifecycle authority를 뜻하지 않습니다. shared input shape와 lifecycle은 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md)을 따릅니다.
+유효한 shared input-required presence는 고정 표시 `Pi needs your input`으로 투영합니다. 새 attention만 기존 gate를 따르므로 policy가 허용해도 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. retained 표시 갱신은 status-only입니다. 이 동작은 새 환경 변수·capability를 만들지 않으며 모든 Pi input wait의 감지나 producer lifecycle authority를 뜻하지 않습니다. shared input shape와 lifecycle은 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md)을 따릅니다.
 
 flash 정책은 다음과 같습니다.
 
@@ -83,7 +83,7 @@ native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|
 
 subagent projection을 철회하면 보류된 completion aggregate도 무효화하고, 그 aggregate가 보류한 local parent attention만 기존 policy와 capability gate를 적용해 fallback으로 처리할 수 있습니다. notification 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
-shared withdrawal의 payload, delivery, retention과 ordering semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md)을 따릅니다. shared runtime의 producer lifecycle은 이 consumer package의 실행 authority 밖이며 이 저장소에는 ask-user producer가 없습니다.
+shared withdrawal의 payload, delivery, retention과 ordering semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md)을 따릅니다. shared runtime의 producer lifecycle은 이 consumer package의 실행 authority 밖이며 이 저장소에는 ask-user producer가 없습니다.
 
 ## opt-in 데이터와 resume 보호
 
@@ -121,7 +121,7 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 | `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
 | `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
 
-고정 `interaction` source의 strict V2 profile(`state: "waiting"`, `interaction: { kind: "ask_user", pending }`, `attention: { reason: "input_required", occurrence }`)은 label이나 payload text 대신 sidebar에 `Pi needs your input`만 사용합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며 producer lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `occurrence: "new"`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `occurrence: "retained"` replay는 notification·flash·log 없이 표시만 갱신합니다.
+고정 `interaction` source의 strict V2 profile(`state: "waiting"`, `interaction: { kind: "ask_user", pending }`, `attention: { reason: "input_required", occurrence }`)과 Pi 0.84.4의 blocking native **TUI** `ui_prompt_start`/`ui_prompt_end` lifecycle은 label·prompt·event title을 사용하지 않고 sidebar에 `Pi needs your input`만 표시합니다. 둘이 겹치면 waiting은 OR로 유지되고 새 notification/flash는 하나만 위 attention gate를 통과합니다. native prompt 종료 뒤에도 V2 `ask_user` wait가 남으면 clear하거나 running으로 복원하지 않습니다. native prompt만 끝난 경우에는 현재 agent lifecycle에 맞춰 running 또는 idle로 복원합니다. non-TUI, 다른 session epoch, replacement, shutdown의 native prompt event는 무시합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며 producer lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `occurrence: "new"`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `occurrence: "retained"` replay는 notification·flash·log 없이 표시만 갱신합니다.
 
 local terminal은 `agent_end`만으로 확정하지 않고 settlement를 의미하는 `agent_settled`에서 최종 publish합니다. hook context가 `isIdle()`을 제공하고 `false`를 반환하면 아직 idle이 아니므로 확정하지 않으며, context나 함수가 없으면 `agent_settled` hook 자체를 settlement 증거로 사용합니다. host가 그 hook 등록 자체를 지원하지 않을 때만 `agent_end` fallback을 사용합니다. terminal sidebar status는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지우지만, 이미 만든 native notification의 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
@@ -190,4 +190,4 @@ identity와 소켓 선택은 fail-closed입니다. 검증에 실패하면 cmux �
 
 5. **시간과 정리** — `PI_CMUX_PRESENCE_TIMEOUT_MS`, `PI_CMUX_PRESENCE_MAX_QUEUE`, `PI_CMUX_PRESENCE_FINAL_CLEAR_MS`가 의도한 값인지 확인합니다. progress flag가 `false`이면 초기화·종료 clear를 포함해 progress를 변경하지 않습니다.
 
-`@earendil-works/pi-coding-agent` peer dependency는 optional `*`이므로 Pi 최소 버전을 선언·강제하지 않습니다. 개발 의존성은 `^0.82.0`이며 현재 `bun.lock`의 해석 버전은 `0.82.1`입니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.
+`@earendil-works/pi-coding-agent` peer dependency는 optional `*`이므로 Pi 최소 버전을 선언·강제하지 않습니다. 개발 의존성과 현재 `bun.lock`의 해석 버전은 exact `0.84.4`입니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.
