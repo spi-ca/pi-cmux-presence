@@ -1984,6 +1984,48 @@ test("withdrawal cancels a rate-limited pending input notification without poiso
 	}
 });
 
+test("V2 withdrawal retains a rate-limited input alert while the native prompt remains", async () => {
+	const socket = await fixture();
+	const clock = new ManualRuntimeClock();
+	const { pi, runtime } = await start(socket, resolvePresenceConfig(), clock);
+	const input = producer(pi, "interaction");
+
+	try {
+		// Exhaust the bucket, then queue a fifth V2 input attention. Starting a
+		// native prompt adopts that queued attention as the combined lifecycle.
+		for (let generation = 1; generation <= 5; generation += 1) {
+			expect(input.publishState(inputState(generation, 0))).toBe(true);
+		}
+		await waitFor(() => notifications(socket.lines).length === 4);
+
+		runtime.handleUiPromptStart({}, {
+			mode: "tui",
+			sessionManager: { getSessionId: () => "acceptance-session" },
+		});
+		expect(input.withdraw({
+			version: 2,
+			generation: 5,
+			sequence: 1,
+			source: "interaction",
+		})).toBe(true);
+
+		// Withdrawal ends only the V2 half. The queued combined-lifecycle alert
+		// must still receive the next token exactly once for the native prompt.
+		clock.advance(1_000);
+		await waitFor(() => notifications(socket.lines).length === 5);
+		clock.advance(1_000);
+		await drainSocketQueue();
+		expect(notifications(socket.lines)).toHaveLength(5);
+
+		runtime.handleUiPromptEnd({}, {
+			mode: "tui",
+			sessionManager: { getSessionId: () => "acceptance-session" },
+		});
+	} finally {
+		await close(runtime, [input], socket);
+	}
+});
+
 test("local ordinal rotation withdraws the old source and resets terminal ordinals", async () => {
 	const socket = await fixture();
 	const { pi, runtime } = await start(socket, {

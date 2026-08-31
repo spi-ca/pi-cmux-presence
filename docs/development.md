@@ -2,10 +2,10 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 해당 개발 의존성 범위는 `^0.82.0`이고 현재 `bun.lock` 해석 버전은 `0.82.1`입니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 해당 개발 의존성과 현재 `bun.lock` 해석 버전은 exact `0.84.4`입니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run check
 bun run test
 bun run ci
@@ -25,7 +25,7 @@ index.ts                  — 안정적인 Pi 확장 진입점, package.json의 
 src/client.ts             — capability-gated V2와 설정-gated V1 cmux 쓰기, resume ownership 확인
 src/config.ts             — public 환경 변수, 기본값, 범위
 src/events.ts             — shared presence의 fixed local projection과 presentation-only registry
-src/hooks.ts              — Pi lifecycle과 shared presence observer 등록
+src/hooks.ts              — Pi lifecycle, 0.84.4 native TUI prompt, shared presence observer 등록
 src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로 검증
 src/notification-policy.ts — exact `subagent` 누적 terminal·attention/flash policy 판정
 src/official-hook.ts      — home-relative agent directory의 bounded regular-file read와 공식 cmux hook authority 감지
@@ -40,7 +40,7 @@ src/usage.ts              — assistant message별 usage delta의 토큰·비용
 src/validation.ts         — untrusted input의 plain-object·control/bidi·protocol token 공통 검증
 test/client.test.ts       — PresenceClient의 capability-gated V2/V1 쓰기와 resume ownership 테스트
 test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트(`settled` trim/case 포함)
-test/entrypoint.test.ts   — 공개 확장 진입점의 V2 listener/hook 등록과 실제 producer→bus→consumer lifecycle 테스트
+test/entrypoint.test.ts   — 공개 확장 진입점의 V2 listener/native TUI prompt hook 등록과 실제 producer→bus→consumer lifecycle 테스트
 test/notification-policy.test.ts — exact `subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — 실제 V2 producer→bus→consumer와 fake Unix socket으로 terminal exactly-once, withdrawal, retained-quiet, source failover와 notification/presentation 경계를 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
@@ -77,7 +77,7 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. startup 소켓 경로 검증은 client ownership 전에 request timeout으로 제한하고 session epoch abort와 race하므로 replacement/shutdown이 느린 filesystem 작업을 기다리지 않습니다. deadline/abort 후에도 남은 resolver는 settle 전까지 독점되어 다음 epoch가 새 filesystem 검증을 시작할 수 없고, stale 결과는 재사용하지 않습니다. transport는 실제 post-connect fingerprint가 미해결인 동안의 request write 전 data/end/close/error만 response로 수락하지 않고 즉시 fail-close합니다. runtime-owned fingerprint lease gate는 replacement를 포함한 모든 runtime transport에서 미해결 filesystem validation 하나만 허용하며 stale lease가 settle될 때까지 새 validation을 거부하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 만들어 같은 보장을 유지합니다. 연결 전 connect error/timeout과 post-write 응답 timeout은 현재 요청만 실패시키고 queue를 close하지 않습니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다. owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 local presentation을 추가하면 style·priority와 privacy/byte-bound 테스트를 함께 갱신합니다.
-- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
+- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
 - 공식 cmux hook probe는 소켓 경로 해석 전에 `timeoutMs` deadline 및 session epoch abort로 제한합니다. probe timeout·abort·오류와 non-regular 또는 64 KiB 초과 source는 authority가 불확실하므로 공식 hook이 있다고 fail-close하며, 실제로 미해결인 underlying probe는 runtime당 하나만 허용하고 늦은 결과를 새 epoch에 적용하지 않습니다. marker가 없는 정상 regular source와 확인된 부재, 정확한 `CMUX_PI_HOOKS_DISABLED=1`만 hook 부재로 처리합니다. 공식 hook이 감지되거나 authority가 불확실하면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.

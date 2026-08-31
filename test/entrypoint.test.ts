@@ -177,6 +177,7 @@ async function cmux(
 	};
 }
 const ctx = (id: string) => ({ sessionManager: { getSessionId: () => id } });
+const tuiCtx = (id: string) => ({ ...ctx(id), mode: "tui" });
 const interaction = (g = 0, s = 0, occurrence: "new" | "retained" = "new") => ({
 	version: 2 as const,
 	generation: g,
@@ -248,6 +249,8 @@ test("registers lifecycle observers", () => {
 			"agent_start",
 			"agent_end",
 			"agent_settled",
+			"ui_prompt_start",
+			"ui_prompt_end",
 			"session_shutdown",
 		]),
 	);
@@ -425,6 +428,102 @@ test("interaction renders fixed private status", async () => {
 		);
 		expect(c.lines.join("\n")).not.toContain("private-session");
 		p.deactivate();
+		await host.life("session_shutdown");
+	} finally {
+		await c.close();
+	}
+});
+test("native TUI and V2 ask_user waiting share one private lifecycle", async () => {
+	const c = await cmux(["notification.create_for_surface"]);
+	try {
+		process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "all";
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx("native-overlap"));
+		await host.life("agent_start");
+		await host.life(
+			"ui_prompt_start",
+			{ title: "NATIVE_TITLE_CANARY /private/prompt" },
+			tuiCtx("native-overlap"),
+		);
+		await waitFor(() => c.lines.some((line) => line.includes("Pi needs your input")));
+		await waitFor(() =>
+			c.requests().filter((request) => request.method === "notification.create_for_surface").length === 1,
+		);
+
+		const p = producer(host, "interaction");
+		p.publishState(interaction());
+		await host.life("ui_prompt_end", {}, tuiCtx("native-overlap"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const key = presenceStatusKey("interaction", c.surfaceId);
+		expect(c.lines).not.toContain(`clear_status ${key} --tab=${c.workspaceId}`);
+		expect(c.requests().filter((request) => request.method === "notification.create_for_surface")).toHaveLength(1);
+
+		p.withdraw({ version: 2, generation: 0, sequence: 1, source: "interaction" });
+		await waitFor(() => c.lines.includes(`clear_status ${key} --tab=${c.workspaceId}`));
+		expect(c.lines.join("\n")).not.toContain("NATIVE_TITLE_CANARY");
+		p.deactivate();
+		await host.life("session_shutdown");
+	} finally {
+		await c.close();
+	}
+});
+test("native TUI prompt end restores idle or running Pi state", async () => {
+	const c = await cmux();
+	try {
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx("native-restore"));
+		await host.life("ui_prompt_start", {}, tuiCtx("native-restore"));
+		await host.life("ui_prompt_end", {}, tuiCtx("native-restore"));
+		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Idle"')));
+
+		await host.life("agent_start");
+		await host.life("ui_prompt_start", {}, tuiCtx("native-restore"));
+		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Waiting"')));
+		await host.life("ui_prompt_end", {}, tuiCtx("native-restore"));
+		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Writing response"')));
+		await host.life("session_shutdown");
+	} finally {
+		await c.close();
+	}
+});
+test("native prompt end is fenced to its replacement session", async () => {
+	const c = await cmux();
+	try {
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx("native-old"));
+		await host.life("ui_prompt_start", {}, tuiCtx("native-old"));
+		await waitFor(() => c.lines.some((line) => line.includes("Pi needs your input")));
+		const statusCount = c.lines.filter((line) => line.includes("Pi needs your input")).length;
+		const key = presenceStatusKey("interaction", c.surfaceId);
+
+		await host.life("session_start", {}, ctx("native-new"));
+		await host.life("ui_prompt_start", {}, tuiCtx("native-new"));
+		await waitFor(() => c.lines.includes(`clear_status ${key} --tab=${c.workspaceId}`));
+		await waitFor(() => c.lines.filter((line) => line.includes("Pi needs your input")).length > statusCount);
+		const clears = c.lines.filter((line) => line === `clear_status ${key} --tab=${c.workspaceId}`).length;
+		await host.life("ui_prompt_end", {}, tuiCtx("native-old"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(c.lines.filter((line) => line === `clear_status ${key} --tab=${c.workspaceId}`)).toHaveLength(clears);
+
+		await host.life("session_shutdown");
+		await waitFor(() => c.lines.filter((line) => line === `clear_status ${key} --tab=${c.workspaceId}`).length === clears + 1);
+	} finally {
+		await c.close();
+	}
+});
+test("native UI prompt events from non-TUI contexts are ignored", async () => {
+	const c = await cmux();
+	try {
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx("non-tui"));
+		await host.life("ui_prompt_start", { title: "NON_TUI_TITLE_CANARY" }, { ...ctx("non-tui"), mode: "rpc" });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(c.lines.join("\n")).not.toContain("Pi needs your input");
+		expect(c.lines.join("\n")).not.toContain("NON_TUI_TITLE_CANARY");
 		await host.life("session_shutdown");
 	} finally {
 		await c.close();

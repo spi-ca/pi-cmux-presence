@@ -5,9 +5,9 @@
 발행할 수 있지만, 이 패키지는 그 producer를 import·실행·제어하지 않습니다.
 
 공유 presence protocol과 lifecycle의 canonical 기준은 고정 tag의
-[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/protocol.md),
-[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/lifecycle.md),
-[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/terminal-batch.md)입니다.
+[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md),
+[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md),
+[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md)입니다.
 
 ## 구현 범위
 
