@@ -12,6 +12,8 @@
 - 실제 post-connect fingerprint가 미해결인 동안 request write 전의 unsolicited data/end/close/error를 hard reject하고 queue를 fail-close합니다. runtime 공유 fingerprint lease gate는 stale lease가 실제 settle할 때까지 session replacement를 포함한 모든 runtime transport의 새 fingerprint를 거부하며 late release를 fence하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 사용합니다. 연결 전 connect error/timeout과 두 fingerprint 완료 뒤의 일반 응답 timeout은 계속 다음 요청을 막지 않습니다. startup resolver도 늦은 epoch 결과를 재사용하지 않고 settle 전에는 새 검증을 시작하지 않습니다.
 - 공식 cmux hook probe를 소켓 해석 전에 `PI_CMUX_PRESENCE_TIMEOUT_MS` 및 session epoch abort로 제한했습니다. timeout·abort·오류와 non-regular 또는 64 KiB 초과 hook source는 official-hook authority를 fail-close하며, 미해결 underlying probe는 하나만 유지하고 늦은 결과가 새 session의 native lifecycle/opt-in integration을 되살리지 못하게 fence합니다.
 - 정상 `session_shutdown`이 기존의 bounded runtime cleanup을 반환·await하도록 변경해 process 종료 전에 owned status clear를 시도합니다. observer 오류는 계속 Pi 작업에 전파하지 않으며 session start는 detached로 유지합니다. crash·`SIGKILL`은 보호하지 않고 persisted cross-process stale-status reconciliation도 아직 구현하지 않았습니다.
+- todo의 untrusted `params`·`error`는 합산 1,024 visited values, object/array identity 추적으로 검증해 cycle·반복 alias를 fail-closed로 거부합니다. 성공한 non-todo tool result는 local ordinal·todo provenance 조회를 생략하되 failed-tool 상태 처리는 유지합니다.
+- client별 status·progress·meta lane은 동일한 encoded V1 write와 성공한 clear acknowledgement를 공유합니다. 실패한 write는 재시도 가능하고 stale failure는 뒤의 lane 값을 지우지 않으므로 정상 teardown이 확인된 clear I/O를 중복하지 않습니다.
 
 ### 테스트
 

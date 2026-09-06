@@ -48,6 +48,103 @@ describe("progress ownership", () => {
   });
 });
 
+describe("semantic V1 wire cache", () => {
+  test("deduplicates exact status, progress, and metadata writes while transmitting changes", async () => {
+    const lines: string[] = [];
+    const client = new PresenceClient(identity, {
+      async request(line: string) { lines.push(line); return "OK"; },
+      async close() {},
+    } as never, config);
+    const style = { icon: "play", color: "#2563eb", priority: 30 };
+
+    await client.status("state", "Working", style);
+    await client.status("state", "Working", style);
+    await client.clearStatus("state");
+    await client.clearStatus("state");
+    await client.status("state", "Done", style);
+    await client.progress(0.5, "Working");
+    await client.progress(0.5, "Working");
+    await client.clearProgress();
+    await client.clearProgress();
+    await client.meta("one");
+    await client.meta("one");
+    await client.clearMeta();
+    await client.clearMeta();
+
+    expect(lines.filter((line) => line.startsWith("set_status "))).toHaveLength(2);
+    expect(lines.filter((line) => line.startsWith("clear_status "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("set_progress "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("clear_progress "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("report_meta_block "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("clear_meta_block "))).toHaveLength(1);
+  });
+
+  test("shares an in-flight clear acknowledgement, retries failures, and fences stale failures", async () => {
+    let releaseFirst!: () => void;
+    let statusWrites = 0;
+    const client = new PresenceClient(identity, {
+      async request(line: string) {
+        if (!line.startsWith("clear_status ")) return "OK";
+        statusWrites += 1;
+        if (statusWrites === 1) {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+          return "OK";
+        }
+        return statusWrites === 2 ? "NOT OK" : "OK";
+      },
+      async close() {},
+    } as never, config);
+
+    const first = client.clearStatus("state");
+    const shared = client.clearStatus("state");
+    expect(statusWrites).toBe(1);
+    releaseFirst();
+    expect(await Promise.all([first, shared])).toEqual([true, true]);
+    expect(await client.clearStatus("state")).toBe(true);
+    expect(statusWrites).toBe(1);
+
+    // An unsuccessful write is not cached and therefore remains retryable.
+    expect(await client.clearStatus("retry")).toBe(false);
+    expect(await client.clearStatus("retry")).toBe(true);
+    expect(statusWrites).toBe(3);
+
+    let releaseStale!: () => void;
+    let staleWrites = 0;
+    const staleClient = new PresenceClient(identity, {
+      async request(line: string) {
+        if (!line.startsWith("set_status ")) return "OK";
+        staleWrites += 1;
+        if (staleWrites === 1) {
+          await new Promise<void>((resolve) => { releaseStale = resolve; });
+          return "NOT OK";
+        }
+        return "OK";
+      },
+      async close() {},
+    } as never, config);
+    const style = { icon: "play", color: "#2563eb", priority: 30 };
+    const stale = staleClient.status("state", "old", style);
+    await Promise.resolve();
+    await staleClient.status("state", "new", style);
+    releaseStale();
+    await stale;
+    await staleClient.status("state", "new", style);
+    expect(staleWrites).toBe(2);
+  });
+
+  test("does not cache an encoding failure", async () => {
+    const lines: string[] = [];
+    const client = new PresenceClient(identity, {
+      async request(line: string) { lines.push(line); return "OK"; },
+      async close() {},
+    } as never, config);
+    const style = { icon: "play", color: "#2563eb", priority: 30 };
+    await client.status("state", "", style);
+    await client.status("state", "Working", style);
+    expect(lines.filter((line) => line.startsWith("set_status "))).toHaveLength(1);
+  });
+});
+
 describe("resume fallback", () => {
   test("does not use optional V2 methods for absent or malformed capabilities", async () => {
     const { client, requests } = clientWith(() => ({}), { protocol: "cmux-socket", version: 2, methods: "not-an-array" });

@@ -136,4 +136,112 @@ describe("V2 presence state", () => {
     const usage = new UsageTracker(); usage.add({ input: 10, output: 5 }); usage.setContext({ percent: 42 });
     expect(usage.snapshot()).toEqual({ tokens: 15, contextPercent: 42 });
   });
+
+  test("bounds todo params and error as one identity-safe traversal", () => {
+    const adapter = new TodoProgressAdapter();
+    const tools = [{ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } }];
+    const accept = (params: Record<string, unknown>, error?: unknown) => adapter.accept({
+      toolName: "todo", isError: false,
+      details: { action: "list", params, ...(error === undefined ? {} : { error }), nextId: 1, tasks: [] },
+    }, tools, 1, 1);
+
+    // Root params + two scalars + outer array + four inner arrays + 1,016
+    // scalars is the documented 1,024-value limit without exceeding width.
+    const atLimit = Array.from({ length: 4 }, () => Array(254).fill(null));
+    expect(accept({ left: null, right: null, values: atLimit })).not.toBeNull();
+    atLimit[0]!.push(null);
+    expect(accept({ left: null, right: null, values: atLimit })).toBeNull();
+
+    const alias = {};
+    expect(accept({ first: alias, second: alias })).toBeNull();
+    expect(accept({ value: alias }, alias)).toBeNull();
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    expect(accept(cycle)).toBeNull();
+  });
+
+  test("rejects todo proxies before invoking their traps", () => {
+    const tools = [{ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } }];
+    const details = { action: "list", params: {}, nextId: 1, tasks: [] };
+    const event = { toolName: "todo", isError: false, details };
+    const accept = (candidateEvent: unknown = event, candidateTools: unknown = tools) => new TodoProgressAdapter().accept(candidateEvent, candidateTools, 1, 1);
+    const trapped = <T extends object>(target: T) => {
+      let calls = 0;
+      const proxy = new Proxy(target, {
+        get(target, property, receiver) { calls += 1; return Reflect.get(target, property, receiver); },
+        getOwnPropertyDescriptor(target, property) { calls += 1; return Reflect.getOwnPropertyDescriptor(target, property); },
+        getPrototypeOf(target) { calls += 1; return Reflect.getPrototypeOf(target); },
+        ownKeys(target) { calls += 1; return Reflect.ownKeys(target); },
+      });
+      return { proxy, calls: () => calls };
+    };
+    const expectRejectedWithoutTraps = (value: ReturnType<typeof trapped>, candidateEvent: unknown = event, candidateTools: unknown = tools) => {
+      expect(accept(candidateEvent, candidateTools)).toBeNull();
+      expect(value.calls()).toBe(0);
+    };
+
+    const params = trapped({});
+    expectRejectedWithoutTraps(params, { ...event, details: { ...details, params: params.proxy } });
+    const error = trapped({});
+    expectRejectedWithoutTraps(error, { ...event, details: { ...details, error: error.proxy } });
+    const tasks = trapped([]);
+    expectRejectedWithoutTraps(tasks, { ...event, details: { ...details, tasks: tasks.proxy } });
+    const task = trapped({ id: 1, status: "pending" });
+    expectRejectedWithoutTraps(task, { ...event, details: { ...details, tasks: [task.proxy] } });
+    const envelope = trapped(event);
+    expectRejectedWithoutTraps(envelope, envelope.proxy);
+    const detail = trapped(details);
+    expectRejectedWithoutTraps(detail, { ...event, details: detail.proxy });
+    const toolList = trapped(tools);
+    expectRejectedWithoutTraps(toolList, event, toolList.proxy);
+    const tool = trapped(tools[0]!);
+    expectRejectedWithoutTraps(tool, event, [tool.proxy]);
+    const sourceInfo = trapped(tools[0]!.sourceInfo);
+    expectRejectedWithoutTraps(sourceInfo, event, [{ ...tools[0]!, sourceInfo: sourceInfo.proxy }]);
+  });
+
+  test("accepts only canonical dense arrays in todo details", () => {
+    const tools = [{ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } }];
+    const accept = (tasks: unknown, params: Record<string, unknown> = {}) => new TodoProgressAdapter().accept({
+      toolName: "todo", isError: false,
+      details: { action: "list", params, nextId: 1, tasks },
+    }, tools, 1, 1);
+
+    const normalTasks = Array.from({ length: 256 }, (_, index) => ({ id: index + 1, status: "pending" }));
+    expect(accept(normalTasks, { values: Array(256).fill(null) })).toMatchObject({ counts: { queued: 256 } });
+    expect(accept(Array.from({ length: 257 }, (_, index) => ({ id: index + 1, status: "pending" })))).toBeNull();
+    expect(accept([], { values: Array(257).fill(null) })).toBeNull();
+
+    const selfByIndex: unknown[] = [];
+    selfByIndex.push(selfByIndex);
+    expect(accept([], { values: selfByIndex })).toBeNull();
+
+    const selfByProperty: unknown[] = [];
+    (selfByProperty as unknown as Record<string, unknown>).self = selfByProperty;
+    expect(accept([], { values: selfByProperty })).toBeNull();
+
+    const unexpectedProperty: unknown[] = [];
+    (unexpectedProperty as unknown as Record<string, unknown>).extra = null;
+    expect(accept(unexpectedProperty)).toBeNull();
+
+    const overriddenEvery: unknown[] = [];
+    Object.defineProperty(overriddenEvery, "every", { value: () => { throw new Error("must not run"); } });
+    expect(accept([], { values: overriddenEvery })).toBeNull();
+
+    const overriddenIterator: unknown[] = [];
+    Object.defineProperty(overriddenIterator, Symbol.iterator, { value: () => { throw new Error("must not run"); } });
+    expect(accept(overriddenIterator)).toBeNull();
+
+    expect(accept(new Array(1))).toBeNull();
+
+    const customPrototype: unknown[] = [];
+    Object.setPrototypeOf(customPrototype, {});
+    expect(accept(customPrototype)).toBeNull();
+
+    let accessorReads = 0;
+    const accessor: unknown[] = [null];
+    Object.defineProperty(accessor, "0", { configurable: true, get() { accessorReads += 1; return null; } });
+    expect(accept(accessor)).toBeNull();
+    expect(accessorReads).toBe(0);
+  });
 });

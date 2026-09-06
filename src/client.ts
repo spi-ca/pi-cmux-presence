@@ -43,6 +43,7 @@ function capabilities(value: unknown): Set<V2Method> {
 }
 
 type ResumeBinding = { kind: "pi"; source: "agent-hook"; checkpoint_id: string };
+type WireLaneOperation = { readonly token: object; readonly encoded: string; readonly outcome: Promise<boolean> };
 
 function resumeBinding(value: unknown): ResumeBinding | null | undefined {
   try {
@@ -68,6 +69,8 @@ export class PresenceClient {
   private closeOperation: Promise<void> | null = null;
   private ownsResumeFallback = false;
   private resumeInstallOperation: Promise<void> | null = null;
+  /** Last successful or in-flight encoded V1 operation per independently coalesced lane. */
+  private readonly wireLanes = new Map<string, WireLaneOperation>();
 
   constructor(
     private readonly identity: CmuxIdentity,
@@ -90,7 +93,7 @@ export class PresenceClient {
   async initializeOwnedProgress(): Promise<void> {
     // Run only after the runtime has made this client the current session owner.
     if (this.config.progress) {
-      await this.v1({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
+      await this.v1Semantic({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
     }
   }
 
@@ -100,7 +103,7 @@ export class PresenceClient {
     style: { icon: string; color: string; priority: number },
   ): Promise<void> {
     if (!this.config.sidebar) return;
-    await this.v1({
+    await this.v1Semantic({
       command: "set_status",
       tab: this.identity.workspaceId,
       panel: this.identity.surfaceId,
@@ -113,17 +116,17 @@ export class PresenceClient {
   /** Reports whether cmux acknowledged the idempotent status withdrawal. */
   async clearStatus(key: string): Promise<boolean> {
     if (!this.config.sidebar) return true;
-    return this.v1({ command: "clear_status", tab: this.identity.workspaceId, key }, `status:${key}`);
+    return this.v1Semantic({ command: "clear_status", tab: this.identity.workspaceId, key }, `status:${key}`);
   }
 
   async progress(value: number, label?: string): Promise<void> {
     if (!this.config.progress) return;
-    await this.v1({ command: "set_progress", tab: this.identity.workspaceId, value, label }, "progress");
+    await this.v1Semantic({ command: "set_progress", tab: this.identity.workspaceId, value, label }, "progress");
   }
 
   async clearProgress(): Promise<void> {
     if (!this.config.progress) return;
-    await this.v1({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
+    await this.v1Semantic({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
   }
 
   async log(level: "info" | "success" | "warning" | "error", message: string): Promise<void> {
@@ -180,7 +183,7 @@ export class PresenceClient {
 
   async meta(markdown: string): Promise<void> {
     if (!this.config.metaBlock) return;
-    await this.v1({
+    await this.v1Semantic({
       command: "report_meta_block",
       tab: this.identity.workspaceId,
       key: "pi-presence",
@@ -191,7 +194,7 @@ export class PresenceClient {
 
   async clearMeta(): Promise<void> {
     if (!this.config.metaBlock) return;
-    await this.v1({
+    await this.v1Semantic({
       command: "clear_meta_block",
       tab: this.identity.workspaceId,
       key: "pi-presence",
@@ -314,10 +317,48 @@ export class PresenceClient {
     return this.supported.has(method) ? await this.v2(method, params, key, queueOptions) : undefined;
   }
 
+  /**
+   * Share only byte-identical V1 writes within a lane. Failures remove exactly
+   * their own entry so retries work without allowing stale failures to evict a
+   * newer set/clear operation.
+   */
+  private v1Semantic(command: V1Command, lane: string): Promise<boolean> {
+    let encoded: string;
+    try {
+      encoded = encodeV1(command);
+    } catch {
+      // Invalid output must not become a cached semantic value.
+      return Promise.resolve(false);
+    }
+    const current = this.wireLanes.get(lane);
+    if (current?.encoded === encoded) return current.outcome;
+    if (this.closed) return Promise.resolve(false);
+
+    const token = {};
+    const outcome = this.v1Encoded(encoded, lane);
+    this.wireLanes.set(lane, { token, encoded, outcome });
+    void outcome.then((acknowledged) => {
+      if (!acknowledged && this.wireLanes.get(lane)?.token === token) {
+        this.wireLanes.delete(lane);
+      }
+    });
+    return outcome;
+  }
+
   private async v1(command: V1Command, key?: string): Promise<boolean> {
+    let encoded: string;
+    try {
+      encoded = encodeV1(command);
+    } catch {
+      return false;
+    }
+    return this.v1Encoded(encoded, key);
+  }
+
+  private async v1Encoded(encoded: string, key?: string): Promise<boolean> {
     if (this.closed) return false;
     try {
-      decodeV1Response(await this.transport.request(encodeV1(command), key));
+      decodeV1Response(await this.transport.request(encoded, key));
       return true;
     } catch {
       // Best-effort observer.

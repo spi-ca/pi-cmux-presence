@@ -102,6 +102,80 @@ class ManualRuntimeClock {
   }
 }
 
+test("tool results inspect todo provenance only for successful todo events", async () => {
+  let toolLookups = 0;
+  const runtime = new PresenceRuntime({
+    getAllTools: () => {
+      toolLookups += 1;
+      return [{ name: "todo", sourceInfo: { path: "/safe/todo.ts", source: "project", scope: "project", origin: "top-level" } }];
+    },
+    events: { emit() {}, on() {} },
+  } as never, config, undefined, async () => true);
+
+  await runtime.startSession(session("tool-results"));
+  runtime.handleAgentStart();
+  const internal = runtime as unknown as { localSequence: number; hadToolError: boolean };
+  const before = internal.localSequence;
+  runtime.handleToolResult({ toolName: "other", isError: false });
+  expect(toolLookups).toBe(0);
+  expect(internal.localSequence).toBe(before);
+
+  runtime.handleToolResult({ toolName: "other", isError: true });
+  expect(toolLookups).toBe(0);
+  expect(internal.hadToolError).toBe(true);
+
+  runtime.handleToolResult({
+    toolName: "todo", isError: false,
+    details: { action: "list", params: {}, nextId: 1, tasks: [] },
+  });
+  expect(toolLookups).toBe(1);
+  await runtime.shutdownSession();
+});
+
+test("tool-result lifecycle rejects proxy events before state or provenance work", async () => {
+  const hooks = new Map<string, Array<(event: unknown, context?: unknown) => unknown>>();
+  const emitted: unknown[] = [];
+  let toolLookups = 0;
+  const api = {
+    getAllTools: () => {
+      toolLookups += 1;
+      return [];
+    },
+    events: {
+      emit: (_name: string, payload: unknown) => { emitted.push(payload); },
+      on() {},
+    },
+    on(name: string, handler: (event: unknown, context?: unknown) => unknown) {
+      hooks.set(name, [...(hooks.get(name) ?? []), handler]);
+    },
+  };
+  const runtime = new PresenceRuntime(api as never, config, undefined, async () => true);
+  registerPresenceHooks(api as never, runtime);
+  await runtime.startSession(session("tool-result-proxy"));
+  runtime.handleAgentStart();
+
+  const internal = runtime as unknown as { localSequence: number; hadToolError: boolean };
+  const sequenceBefore = internal.localSequence;
+  const emittedBefore = emitted.length;
+  let getTraps = 0;
+  const event = new Proxy({ toolName: "todo", isError: true }, {
+    get(target, property, receiver) {
+      getTraps += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const handler = hooks.get("tool_result")?.[0];
+  expect(handler).toBeDefined();
+  handler!(event);
+
+  expect(getTraps).toBe(0);
+  expect(internal.hadToolError).toBe(false);
+  expect(internal.localSequence).toBe(sequenceBefore);
+  expect(emitted).toHaveLength(emittedBefore);
+  expect(toolLookups).toBe(0);
+  await runtime.shutdownSession();
+});
+
 test("startup stays detached while shutdown remains awaitable with a stalled resolver", async () => {
   const previousWorkspace = process.env.CMUX_WORKSPACE_ID;
   const previousSurface = process.env.CMUX_SURFACE_ID;

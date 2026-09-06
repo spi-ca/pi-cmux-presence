@@ -1,8 +1,11 @@
+import { types } from "node:util";
 import type { PresenceUpdate } from "./events.js";
 import { isPlainObject } from "./validation.js";
 
 const MAX_TASKS = 256;
 const MAX_FIELDS = 32;
+/** Conservative shared limit for untrusted params/error traversal, including scalars. */
+const MAX_TREE_VALUES = 1_024;
 const STATUSES = new Set(["pending", "in_progress", "completed", "deleted"]);
 const DETAIL_KEYS = new Set(["action", "params", "tasks", "nextId", "error"]);
 // RPIV task descriptions are intentionally never read or retained.
@@ -11,6 +14,7 @@ const TASK_KEYS = new Set(["id", "status", "content", "subject", "title", "descr
 type ToolInfoLike = { name?: unknown; sourceInfo?: { path?: unknown; source?: unknown; scope?: unknown; origin?: unknown } };
 
 function ownData(value: Record<string, unknown>, keys: Iterable<PropertyKey>, limit = MAX_FIELDS): boolean {
+  if (types.isProxy(value)) return false;
   const allowed = new Set(keys);
   const names = Reflect.ownKeys(value);
   if (names.length > limit) return false;
@@ -21,25 +25,67 @@ function ownData(value: Record<string, unknown>, keys: Iterable<PropertyKey>, li
   }
   return true;
 }
-function safeTree(value: unknown, depth = 0): boolean {
+type TreeTraversal = { visited: number; identities: WeakSet<object> };
+
+/** Extract only ordinary, dense arrays without invoking untrusted methods. */
+function canonicalArray(value: unknown, maxLength: number): unknown[] | null {
+  if (types.isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor) || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 || lengthDescriptor.value > maxLength) return null;
+  const length = lengthDescriptor.value;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1) return null;
+  const values = new Array<unknown>(length);
+  let hasLength = false;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (key === "length") {
+      if (hasLength) return null;
+      hasLength = true;
+      continue;
+    }
+    if (key !== String(index)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) return null;
+    values[index] = descriptor.value;
+  }
+  return hasLength ? values : null;
+}
+
+/**
+ * Validate params and error as one bounded tree. Repeated container identities
+ * are rejected rather than revisited, so aliases and cycles fail closed.
+ */
+function safeTree(value: unknown, traversal: TreeTraversal, depth = 0): boolean {
+  if (++traversal.visited > MAX_TREE_VALUES) return false;
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (depth >= 4) return false;
-  if (Array.isArray(value)) return value.length <= MAX_TASKS && value.every((item) => safeTree(item, depth + 1));
+  if (typeof value !== "object" || value === null || types.isProxy(value)) return false;
+  if (traversal.identities.has(value)) return false;
+  traversal.identities.add(value);
+  if (Array.isArray(value)) {
+    const values = canonicalArray(value, MAX_TASKS);
+    if (!values) return false;
+    for (let index = 0; index < values.length; index += 1) {
+      if (!safeTree(values[index], traversal, depth + 1)) return false;
+    }
+    return true;
+  }
   if (!isPlainObject(value) || Reflect.ownKeys(value).length > MAX_FIELDS) return false;
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") return false;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !("value" in descriptor) || !safeTree(descriptor.value, depth + 1)) return false;
+    if (!descriptor || !("value" in descriptor) || !safeTree(descriptor.value, traversal, depth + 1)) return false;
   }
   return true;
 }
 function owner(tools: unknown): string | null {
-  if (!Array.isArray(tools)) return null;
-  const matches = tools.filter((tool): tool is ToolInfoLike => isPlainObject(tool) && tool.name === "todo");
+  if (types.isProxy(tools) || !Array.isArray(tools)) return null;
+  const matches = tools.filter((tool): tool is ToolInfoLike => !types.isProxy(tool) && isPlainObject(tool) && tool.name === "todo");
   if (matches.length !== 1) return null;
   const info = matches[0].sourceInfo;
-  if (!isPlainObject(info) || typeof info.path !== "string" || typeof info.source !== "string" || typeof info.scope !== "string" || typeof info.origin !== "string") return null;
+  if (types.isProxy(info) || !isPlainObject(info) || typeof info.path !== "string" || typeof info.source !== "string" || typeof info.scope !== "string" || typeof info.origin !== "string") return null;
   return `${info.path}\u0000${info.source}\u0000${info.scope}\u0000${info.origin}`;
 }
 
@@ -48,15 +94,19 @@ export class TodoProgressAdapter {
   private owner: string | null = null;
   accept(event: unknown, tools: unknown, generation: number, sequence: number): PresenceUpdate | null {
     try {
-      if (!isPlainObject(event) || event.toolName !== "todo" || event.isError !== false) return null;
+      if (types.isProxy(event) || !isPlainObject(event) || event.toolName !== "todo" || event.isError !== false) return null;
       const currentOwner = owner(tools);
       if (!currentOwner || (this.owner !== null && currentOwner !== this.owner)) return null;
       const details = event.details;
-      if (!isPlainObject(details) || !ownData(details, DETAIL_KEYS, 5) || typeof details.action !== "string" || details.action.length > 64 || !isPlainObject(details.params) || !safeTree(details.params) || !Array.isArray(details.tasks) || details.tasks.length > MAX_TASKS || !Number.isSafeInteger(details.nextId) || (details.nextId as number) < 1 || (details.nextId as number) > Number.MAX_SAFE_INTEGER || (details.error !== undefined && !safeTree(details.error))) return null;
+      const traversal: TreeTraversal = { visited: 0, identities: new WeakSet() };
+      if (types.isProxy(details) || !isPlainObject(details) || !ownData(details, DETAIL_KEYS, 5) || typeof details.action !== "string" || details.action.length > 64 || types.isProxy(details.params) || !isPlainObject(details.params)) return null;
+      const tasks = canonicalArray(details.tasks, MAX_TASKS);
+      if (!safeTree(details.params, traversal) || !tasks || !Number.isSafeInteger(details.nextId) || (details.nextId as number) < 1 || (details.nextId as number) > Number.MAX_SAFE_INTEGER || (details.error !== undefined && !safeTree(details.error, traversal))) return null;
       let active = 0; let completed = 0; let queued = 0; let visible = 0;
       const taskIds = new Set<number>();
-      for (const rawTask of details.tasks) {
-        if (!isPlainObject(rawTask) || !ownData(rawTask, TASK_KEYS) || !Number.isSafeInteger(rawTask.id) || (rawTask.id as number) < 1 || (rawTask.id as number) > Number.MAX_SAFE_INTEGER || typeof rawTask.status !== "string" || !STATUSES.has(rawTask.status)) return null;
+      for (let index = 0; index < tasks.length; index += 1) {
+        const rawTask = tasks[index];
+        if (types.isProxy(rawTask) || !isPlainObject(rawTask) || !ownData(rawTask, TASK_KEYS) || !Number.isSafeInteger(rawTask.id) || (rawTask.id as number) < 1 || (rawTask.id as number) > Number.MAX_SAFE_INTEGER || typeof rawTask.status !== "string" || !STATUSES.has(rawTask.status)) return null;
         const id = rawTask.id as number; const status = rawTask.status;
         if (taskIds.has(id)) return null;
         taskIds.add(id);
