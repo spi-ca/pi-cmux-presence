@@ -111,3 +111,14 @@ bun run diagram:render
 - 전체 구현 목록보다 안정적인 개념을 우선합니다.
 - 예외를 추가하기보다 모순을 제거합니다.
 - 중복된 명령 목록은 최소화하고 `package.json`과 맞춥니다.
+
+## 자동 CI 호환성 매트릭스
+
+push와 pull request CI는 provider credential, live cmux socket 또는 acceptance를 사용하지 않습니다. `bun run ci`, `bun pm pack --dry-run`, 그리고 tarball을 격리된 임시 consumer에 lifecycle script 없이 설치해 registration stub으로 import하는 smoke를 실행합니다. smoke는 `KIRO_API_KEY`를 제거하고 `PI_OFFLINE=1`을 설정합니다. 두 lane 모두 선택된 Bun 버전과 `cc` compiler의 위치·버전을 로그로 확인합니다.
+
+| lane | Bun | Pi development graph | install |
+| --- | --- | --- | --- |
+| locked baseline | 1.3.14 (`packageManager`) | `pi-coding-agent` exact 0.84.4 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | 선언된 Pi devDependency를 exact 0.85.1로 선택한 임시 graph | `bun install --no-save` |
+
+각 lane의 repository 설치 graph verifier는 Bun의 hoisted link와 `.bun` store 안의 nested symlink를 모두 순회해 설치된 모든 `@earendil-works/pi-*` 버전을 확인합니다. locked baseline은 Pi stack 이름별 `0.84.4` mapping을, current lane은 `0.85.1` mapping을 사용하며, 선택된 mapping의 모든 package는 정확한 버전으로 설치되어야 합니다. 별도로 tarball smoke의 격리 consumer는 wildcard 또는 transitive drift를 막는 결정적 호환성 harness로서 선택된 전체 exact Pi graph와 선언된 non-Pi peer를 의도적으로 주입합니다. 이는 최소 peer 설치를 증명하는 검사는 아닙니다. current lane은 optional peer `*`가 최신 Pi를 우연히 고르지 않도록 CI의 임시 manifest에서 모든 선언된 Pi 개발 패키지를 exact `0.85.1`로 바꿉니다. 마지막에 manifest와 lockfile은 원래 상태인지 검사하므로 lockfile 변경을 만들지 않습니다. 이는 hosted CI에서 구성할 검증이며, 로컬 재설치·다운로드 또는 live cmux 호환성 실행 결과는 아닙니다.

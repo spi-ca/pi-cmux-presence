@@ -329,6 +329,19 @@ test("idle settlement uses an explicit V2 terminal", async () => {
 	expect(host.emitted.some((e) => e.name === EVENT_NAMES.terminal)).toBe(true);
 	await host.life("session_shutdown");
 });
+test("a later successful assistant stop publishes a completed terminal after a tool error", async () => {
+	const host = pi();
+	extension(host.api as never);
+	await host.life("session_start", {}, ctx("tool-error-recovered"));
+	await host.life("agent_start");
+	await host.life("tool_result", { isError: true });
+	await host.life("agent_end", { messages: [{ stopReason: "error" }, { stopReason: "stop" }] });
+	await host.life("agent_settled");
+	expect(host.emitted.find((event) => event.name === EVENT_NAMES.terminal)?.payload).toMatchObject({
+		outcome: "completed",
+	});
+	await host.life("session_shutdown");
+});
 
 // V2 consumer-first and producer-first handshake coverage.
 test("consumer-first producer receives a target receipt", async () => {

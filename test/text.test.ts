@@ -162,5 +162,8 @@ describe("UTF-8 bounded presence text", () => {
     const higher = { ...event("Higher"), usage: { contextPercent: 75 } };
     expect(aggregateMetadata([lower, higher]).split("\n").at(-1)).toBe("75");
     expect(deriveTerminalState([{ stopReason: "error" }], false)).toBe("error");
+    expect(deriveTerminalState([{ stopReason: "error" }, { stopReason: "stop" }], true)).toBe("success");
+    expect(deriveTerminalState([{ stopReason: "error" }, { stopReason: "aborted" }], false)).toBe("cancelled");
+    expect(deriveTerminalState([{ stopReason: "stop" }, { stopReason: "error" }], false)).toBe("error");
   });
 });

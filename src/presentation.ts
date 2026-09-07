@@ -253,8 +253,11 @@ export function deriveTerminalState(
     const message = messages[index];
     if (typeof message !== "object" || message === null) continue;
     const stopReason = (message as { stopReason?: unknown }).stopReason;
-    if (stopReason === "aborted") return "cancelled";
+    if (stopReason === "aborted" || stopReason === "cancelled") return "cancelled";
     if (stopReason === "error") return "error";
+    // A later completed assistant response recovers an earlier retry error and
+    // is authoritative over the per-turn tool fallback.
+    if (stopReason === "stop" || stopReason === "length" || stopReason === "toolUse") return "success";
   }
   return hadToolError ? "error" : "success";
 }
