@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { types } from "node:util";
 import {
   createPresenceConsumer,
   createPresenceProducer,
@@ -601,12 +602,22 @@ export class PresenceRuntime {
   }
 
   handleToolResult(event: unknown): void {
-    if (!this.sessionId) return;
-    if (typeof event === "object" && event !== null && (event as { isError?: unknown }).isError === true && this.active) {
-      this.hadToolError = true;
+    if (!this.sessionId || types.isProxy(event)) return;
+    let todoSuccess = false;
+    try {
+      if (typeof event === "object" && event !== null) {
+        const result = event as { isError?: unknown; toolName?: unknown };
+        if (result.isError === true && this.active) this.hadToolError = true;
+        todoSuccess = result.toolName === "todo" && result.isError === false;
+      }
+    } catch {
+      // Generic failed-tool state and todo provenance are best-effort.
     }
 
     this.activateLocalProducers();
+    // Successful non-todo results do not consume local source ordinals or
+    // inspect the installed tool list. Todo remains provenance-fenced below.
+    if (!todoSuccess) return;
     this.ensureLocalOrdinals(1);
     let todoEvent: PresenceUpdate | null = null;
     try {

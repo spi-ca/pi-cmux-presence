@@ -50,7 +50,7 @@ pi install -l /absolute/path/to/pi-cmux-presence
 - 최종 상태는 settlement를 의미하는 `agent_settled`에서 확정합니다. host context가 `isIdle()`을 제공해 명시적으로 `false`를 반환하면 확정하지 않으며, host가 그 hook 등록을 지원하지 않을 때만 `agent_end` fallback을 사용합니다. assistant 토큰, 양수 비용, 가능한 context 사용률과 `tool_result.isError`를 반영합니다. 내장 Pi 이벤트는 progress를 추정하지 않습니다.
 - host session ID가 이벤트 계약의 safe text 조건(1–96 Unicode code points)을 만족하지 않거나 조회 중 오류가 나면 해당 세션의 presence를 fail-closed로 비활성화하고 기존에 소유한 출력을 정리합니다. Pi lifecycle 오류로 전파하지 않습니다.
 - 상태·progress·notification·auto-title 문자열은 control/bidi 문자를 정규화하고 Unicode code point를 자르지 않으면서 설정의 글자 수와 목적지별 UTF-8 byte 한도를 모두 만족하도록 축약합니다.
-- 모든 관찰 쓰기는 best-effort입니다. 소켓 오류·시간 초과·큐 포화·응답 오류는 Pi 작업을 실패시키지 않으며 해당 출력만 유실될 수 있습니다. 같은 key로 대기 중인 UI 쓰기는 하나의 promise를 공유하며 최신 요청으로 교체되는 latest-write-wins 방식으로 병합되고, 이미 실행 중인 요청은 교체하지 않습니다. opt-in feed edge는 key로 병합하지 않는 낮은 우선순위 항목이므로 FIFO prefix만 보존하며, 대기 중인 primary 출력이 있으면 그 앞에 배치되거나 자리를 내줍니다. 이는 소켓 **전송** 병합이며, `pi-subagent`의 terminal 집계·시간 창 병합과는 별개입니다.
+- 모든 관찰 쓰기는 best-effort입니다. 소켓 오류·시간 초과·큐 포화·응답 오류는 Pi 작업을 실패시키지 않으며 해당 출력만 유실될 수 있습니다. status·progress·meta는 client별 lane에서 동일한 encoded write(성공한 clear 포함)를 공유하고 실패 시에만 재시도하며, 변경된 write는 계속 전송합니다. 같은 key로 대기 중인 UI 쓰기는 하나의 promise를 공유하며 최신 요청으로 교체되는 latest-write-wins 방식으로 병합되고, 이미 실행 중인 요청은 교체하지 않습니다. opt-in feed edge는 key로 병합하지 않는 낮은 우선순위 항목이므로 FIFO prefix만 보존하며, 대기 중인 primary 출력이 있으면 그 앞에 배치되거나 자리를 내줍니다. 이는 소켓 **전송** 병합이며, `pi-subagent`의 terminal 집계·시간 창 병합과는 별개입니다.
 - session start는 계속 detached이지만 정상적인 `session_shutdown`은 기존의 bounded cleanup을 await합니다. cleanup 오류는 삼켜 Pi 작업을 실패시키지 않습니다. 이는 정상 종료의 clear 전달 기회를 높일 뿐 crash나 `SIGKILL`에는 적용되지 않습니다. 현재 process 간 stale status를 복구하는 persisted reconciliation은 없으며, lease/TTL 또는 owner 기반 복구는 향후 설계 선택지일 뿐 구현된 동작이 아닙니다.
 - 외부 producer는 선택 사항입니다. `pi-subagent`는 이 패키지가 import하거나 제어하지 않는 별도 package이며, 같은 Pi runtime의 shared presence를 이 consumer가 cmux에 선택적으로 투영합니다. subagent completion은 한 번의 누적 attention으로 묶을 수 있습니다. 상세 경계는 [`docs/pi-subagent-integration.md`](docs/pi-subagent-integration.md)를 참고하세요.
 - input-required projection은 고정 문구 `Pi needs your input`만 표시합니다. 새 attention만 기존 log/notification/flash gate를 따르고 retained 표시 갱신은 status-only입니다. 이는 모든 Pi 입력 대기를 감지하거나 producer 실행·취소 권한을 얻는 기능이 아닙니다. 상세 경계는 [`docs/event-contract.md`](docs/event-contract.md)를 참고하세요.
@@ -84,7 +84,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 ## 개인정보와 전송 범위
 
-내장 Pi와 todo의 기본 상태 출력은 필요한 숫자 summary만 사용합니다. local Pi sidebar/notification에는 assistant response body·preview, 사용자 프롬프트, raw error, 파일 경로, 도구 인수·출력, task 설명·제목, credential을 수집하거나 소켓으로 보내지 않습니다.
+내장 Pi와 todo의 기본 상태 출력은 필요한 숫자 summary만 사용합니다. todo의 untrusted `params`·`error` 검사는 두 필드 합산 1,024 visited values로 제한하고 cycle·반복 object/array alias를 거부합니다. local Pi sidebar/notification에는 assistant response body·preview, 사용자 프롬프트, raw error, 파일 경로, 도구 인수·출력, task 설명·제목, credential을 수집하거나 소켓으로 보내지 않습니다.
 
 이 consumer는 `Pi`, `Pi todo`, `Subagents`, `Input`과 `Source completed/total` 같은 fixed text만 표시하며 producer label·task text·session ID·경로·prompt·run ID는 cmux로 복사하지 않습니다.
 
