@@ -78,7 +78,7 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. startup 소켓 경로 검증은 client ownership 전에 request timeout으로 제한하고 session epoch abort와 race하므로 replacement/shutdown이 느린 filesystem 작업을 기다리지 않습니다. deadline/abort 후에도 남은 resolver는 settle 전까지 독점되어 다음 epoch가 새 filesystem 검증을 시작할 수 없고, stale 결과는 재사용하지 않습니다. transport는 실제 post-connect fingerprint가 미해결인 동안의 request write 전 data/end/close/error만 response로 수락하지 않고 즉시 fail-close합니다. runtime-owned fingerprint lease gate는 replacement를 포함한 모든 runtime transport에서 미해결 filesystem validation 하나만 허용하며 stale lease가 settle될 때까지 새 validation을 거부하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 만들어 같은 보장을 유지합니다. 연결 전 connect error/timeout과 post-write 응답 timeout은 현재 요청만 실패시키고 queue를 close하지 않습니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다. owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 local presentation을 추가하면 style·priority와 privacy/byte-bound 테스트를 함께 갱신합니다.
-- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
+- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
 - 공식 cmux hook probe는 소켓 경로 해석 전에 `timeoutMs` deadline 및 session epoch abort로 제한합니다. probe timeout·abort·오류와 non-regular 또는 64 KiB 초과 source는 authority가 불확실하므로 공식 hook이 있다고 fail-close하며, 실제로 미해결인 underlying probe는 runtime당 하나만 허용하고 늦은 결과를 새 epoch에 적용하지 않습니다. marker가 없는 정상 regular source와 확인된 부재, 정확한 `CMUX_PI_HOOKS_DISABLED=1`만 hook 부재로 처리합니다. 공식 hook이 감지되거나 authority가 불확실하면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
@@ -111,3 +111,14 @@ bun run diagram:render
 - 전체 구현 목록보다 안정적인 개념을 우선합니다.
 - 예외를 추가하기보다 모순을 제거합니다.
 - 중복된 명령 목록은 최소화하고 `package.json`과 맞춥니다.
+
+## 자동 CI 호환성 매트릭스
+
+push와 pull request CI는 provider credential, live cmux socket 또는 acceptance를 사용하지 않습니다. `bun run ci`, `bun pm pack --dry-run`, 그리고 tarball을 격리된 임시 consumer에 lifecycle script 없이 설치해 registration stub으로 import하는 smoke를 실행합니다. smoke는 `KIRO_API_KEY`를 제거하고 `PI_OFFLINE=1`을 설정합니다. 두 lane 모두 선택된 Bun 버전과 `cc` compiler의 위치·버전을 로그로 확인합니다.
+
+| lane | Bun | Pi development graph | install |
+| --- | --- | --- | --- |
+| locked baseline | 1.3.14 (`packageManager`) | `pi-coding-agent` exact 0.84.4 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | 선언된 Pi devDependency를 exact 0.85.1로 선택한 임시 graph | `bun install --no-save` |
+
+각 lane의 repository 설치 graph verifier는 Bun의 hoisted link와 `.bun` store 안의 nested symlink를 모두 순회해 설치된 모든 `@earendil-works/pi-*` 버전을 확인합니다. locked baseline은 Pi stack 이름별 `0.84.4` mapping을, current lane은 `0.85.1` mapping을 사용하며, 선택된 mapping의 모든 package는 정확한 버전으로 설치되어야 합니다. 별도로 tarball smoke의 격리 consumer는 wildcard 또는 transitive drift를 막는 결정적 호환성 harness로서 선택된 전체 exact Pi graph와 선언된 non-Pi peer를 의도적으로 주입합니다. 이는 최소 peer 설치를 증명하는 검사는 아닙니다. current lane은 optional peer `*`가 최신 Pi를 우연히 고르지 않도록 CI의 임시 manifest에서 모든 선언된 Pi 개발 패키지를 exact `0.85.1`로 바꿉니다. 마지막에 manifest와 lockfile은 원래 상태인지 검사하므로 lockfile 변경을 만들지 않습니다. 이는 hosted CI에서 구성할 검증이며, 로컬 재설치·다운로드 또는 live cmux 호환성 실행 결과는 아닙니다.

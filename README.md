@@ -11,11 +11,8 @@ Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
 ```bash
-# v20260907-2 전역 설치
-pi install git:github.com/spi-ca/pi-cmux-presence@v20260907-2
-
-# 갱신: `v20260907-2` 부분을 존재하는 release tag로 바꾸어 실행
-pi install git:github.com/spi-ca/pi-cmux-presence@v20260907-2
+# v20260907-3 전역 설치
+pi install git:github.com/spi-ca/pi-cmux-presence@v20260907-3
 
 # 제거
 pi remove git:github.com/spi-ca/pi-cmux-presence
@@ -24,7 +21,7 @@ pi remove git:github.com/spi-ca/pi-cmux-presence
 프로젝트에만 설치하려면 프로젝트 루트에서 설치 명령에 `-l`을 붙입니다.
 
 ```bash
-pi install -l git:github.com/spi-ca/pi-cmux-presence@v20260907-2
+pi install -l git:github.com/spi-ca/pi-cmux-presence@v20260907-3
 ```
 
 ### 로컬 경로 설치·개발
@@ -80,7 +77,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 ## Shared presence contract
 
-공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
+공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
 
 ## 개인정보와 전송 범위
 

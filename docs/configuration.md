@@ -40,7 +40,7 @@ notification 정책은 다음과 같습니다.
 
 기본값은 계속 `background`이며 `settled`는 명시 opt-in입니다. 여기서 `background`는 cmux 포커스, foreground/background 전환 또는 대상 handoff를 읽거나 제어한다는 뜻이 아닙니다. 이 패키지는 focus polling을 하지 않고 신뢰할 수 있는 read-only focus capability도 사용하지 않습니다. focused surface의 banner를 보일지 억제할지는 cmux가 소유합니다.
 
-유효한 shared input-required presence는 고정 표시 `Pi needs your input`으로 투영합니다. 새 attention만 기존 gate를 따르므로 policy가 허용해도 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. retained 표시 갱신은 status-only입니다. 이 동작은 새 환경 변수·capability를 만들지 않으며 모든 Pi input wait의 감지나 producer lifecycle authority를 뜻하지 않습니다. shared input shape와 lifecycle은 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md)을 따릅니다.
+유효한 shared input-required presence는 고정 표시 `Pi needs your input`으로 투영합니다. 새 attention만 기존 gate를 따르므로 policy가 허용해도 legacy kill switch, exact child-profile suppression, V2 capability를 모두 통과해야 native notification/flash가 생깁니다. retained 표시 갱신은 status-only입니다. 이 동작은 새 환경 변수·capability를 만들지 않으며 모든 Pi input wait의 감지나 producer lifecycle authority를 뜻하지 않습니다. shared input shape와 lifecycle은 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md)을 따릅니다.
 
 flash 정책은 다음과 같습니다.
 
@@ -83,7 +83,7 @@ native lifecycle은 `set_agent_pid pi <pid>`와 `set_agent_lifecycle pi running|
 
 subagent projection을 철회하면 보류된 completion aggregate도 무효화하고, 그 aggregate가 보류한 local parent attention만 기존 policy와 capability gate를 적용해 fallback으로 처리할 수 있습니다. notification 보존·dismiss·focused-banner 표시는 cmux가 소유합니다.
 
-shared withdrawal의 payload, delivery, retention과 ordering semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md)을 따릅니다. shared runtime의 producer lifecycle은 이 consumer package의 실행 authority 밖이며 이 저장소에는 ask-user producer가 없습니다.
+shared withdrawal의 payload, delivery, retention과 ordering semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md) 및 [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md)을 따릅니다. shared runtime의 producer lifecycle은 이 consumer package의 실행 authority 밖이며 이 저장소에는 ask-user producer가 없습니다.
 
 ## opt-in 데이터와 resume 보호
 

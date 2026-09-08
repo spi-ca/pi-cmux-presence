@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## v20260907-3 — 2026-09-07
+
 ### 신뢰성
 
+- assistant tool error 뒤의 더 늦은 완료 응답을 terminal `completed`로 판정해, 복구된 turn이 `error`로 남지 않게 했습니다.
 - `BoundedSocketQueue`는 포화 시 primary 출력을 대기 feed보다 앞에 넣고 가장 최근의 displaceable feed만 교체하며, 남은 feed의 FIFO 순서를 유지합니다.
 - consumer-side `pi-presence:withdraw:v2`을 추가해 수락된 외부 source의 retained status를 철회하고, 공유 generation/sequence tombstone fence를 유지한 채 progress와 opt-in meta block을 다시 계산합니다. exact `subagent` remove는 pending terminal 집계를 무효화하고 보류된 local parent attention을 고정 fallback으로 복원합니다.
 - `settled` notification policy를 추가했습니다. 기본값은 계속 `background`이며, settled는 local success/error와 external error를 허용하고 generic external info/success는 억제합니다. 성공 부모 settlement와 exact `subagent` 성공 집계의 병합은 finalized local completion으로 허용합니다.
@@ -17,6 +20,7 @@
 
 ### 테스트
 
+- locked baseline과 current Pi compatibility matrix, package tarball registration smoke를 GitHub Actions CI에 추가했습니다.
 - 포화된 queue에서 primary 출력이 가장 최근 feed를 교체하고, 앞선 feed들이 FIFO로 dispatch되는 회귀를 검증합니다.
 - shared V2 runtime의 strict DTO/receipt, fixed source strings, structured attention, terminal channel, withdrawal tombstone, exact status clear, progress/meta 재계산, `subagent` pending invalidation과 local fallback 복원을 검증합니다.
 - `settled` config trim/case, policy matrix·kill switch, canonical local formatter의 static/no-payload byte bound, idle settlement의 exactly-once local notification과 final sidebar clear를 검증합니다.
