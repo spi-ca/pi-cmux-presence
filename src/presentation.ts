@@ -257,7 +257,10 @@ export function deriveTerminalState(
     if (stopReason === "error") return "error";
     // A later completed assistant response recovers an earlier retry error and
     // is authoritative over the per-turn tool fallback.
-    if (stopReason === "stop" || stopReason === "length" || stopReason === "toolUse") return "success";
+    if (stopReason === "stop" || stopReason === "length") return "success";
+    // A tool-only ending is not an assistant recovery response. Its parent
+    // tool result remains authoritative; handled nested errors never reach it.
+    if (stopReason === "toolUse") return hadToolError ? "error" : "success";
   }
   return hadToolError ? "error" : "success";
 }

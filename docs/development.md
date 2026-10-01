@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 해당 개발 의존성과 현재 `bun.lock` 해석 버전은 exact `0.84.4`입니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `0.99.2`입니다. Pi stack의 caret transitive drift를 막기 위해 `chord`와 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정합니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -25,7 +25,7 @@ index.ts                  — 안정적인 Pi 확장 진입점, package.json의 
 src/client.ts             — capability-gated V2와 설정-gated V1 cmux 쓰기, resume ownership 확인
 src/config.ts             — public 환경 변수, 기본값, 범위
 src/events.ts             — shared presence의 fixed local projection과 presentation-only registry
-src/hooks.ts              — Pi lifecycle, 0.84.4 native TUI prompt, shared presence observer 등록
+src/hooks.ts              — Pi lifecycle, native TUI prompt, shared presence observer 등록; terminal은 agent_settled 전용
 src/identity.ts           — workspace/surface UUID와 안전한 소켓 경로 검증
 src/notification-policy.ts — exact `subagent` 누적 terminal·attention/flash policy 판정
 src/official-hook.ts      — home-relative agent directory의 bounded regular-file read와 공식 cmux hook authority 감지
@@ -40,7 +40,7 @@ src/usage.ts              — assistant message별 usage delta의 토큰·비용
 src/validation.ts         — untrusted input의 plain-object·control/bidi·protocol token 공통 검증
 test/client.test.ts       — PresenceClient의 capability-gated V2/V1 쓰기와 resume ownership 테스트
 test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 테스트(`settled` trim/case 포함)
-test/entrypoint.test.ts   — 공개 확장 진입점의 V2 listener/native TUI prompt hook 등록과 실제 producer→bus→consumer lifecycle 테스트
+test/entrypoint.test.ts   — 공개 확장 진입점의 V2/native TUI 등록, continuation settlement exactly-once와 multi-depth nested parent outcome, 실제 producer→bus→consumer 및 fake-socket privacy 테스트
 test/notification-policy.test.ts — exact `subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — 실제 V2 producer→bus→consumer와 fake Unix socket으로 terminal exactly-once, withdrawal, retained-quiet, source failover와 notification/presentation 경계를 검증
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
@@ -78,8 +78,10 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. startup 소켓 경로 검증은 client ownership 전에 request timeout으로 제한하고 session epoch abort와 race하므로 replacement/shutdown이 느린 filesystem 작업을 기다리지 않습니다. deadline/abort 후에도 남은 resolver는 settle 전까지 독점되어 다음 epoch가 새 filesystem 검증을 시작할 수 없고, stale 결과는 재사용하지 않습니다. transport는 실제 post-connect fingerprint가 미해결인 동안의 request write 전 data/end/close/error만 response로 수락하지 않고 즉시 fail-close합니다. runtime-owned fingerprint lease gate는 replacement를 포함한 모든 runtime transport에서 미해결 filesystem validation 하나만 허용하며 stale lease가 settle될 때까지 새 validation을 거부하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 만들어 같은 보장을 유지합니다. 연결 전 connect error/timeout과 post-write 응답 timeout은 현재 요청만 실패시키고 queue를 close하지 않습니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다. owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 local presentation을 추가하면 style·priority와 privacy/byte-bound 테스트를 함께 갱신합니다.
-- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
+- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
+- `agent_end`는 최종 settlement가 아닙니다. retry·compaction·queued work·`agent_before_settle` continuation은 `agent_settled`까지 같은 부모 activity/usage로 유지하고, terminal·completion attention·feed `Stop`·final clear를 중간에 발행하지 않습니다. registration throw로 hook 지원 여부를 추측하는 fallback을 추가하지 않습니다.
+- `parentToolCallId`가 있는 nested `tool_result` error는 caller-owned이며 처리된 child error로 부모 실패를 만들지 않습니다. top-level failure fallback과 이후 완료 assistant recovery를 구분하고 tool-only ending이 top-level error를 숨기지 않게 합니다. 성공 nested todo도 기존 provenance/privacy gate를 유지합니다.
 - `UsageTracker`에는 각 assistant message의 usage를 그 message의 delta로만 전달합니다. `add()`는 message별 토큰·비용 delta를 더하므로 누적 total을 반복 전달하면 안 됩니다.
 - 공식 cmux hook probe는 소켓 경로 해석 전에 `timeoutMs` deadline 및 session epoch abort로 제한합니다. probe timeout·abort·오류와 non-regular 또는 64 KiB 초과 source는 authority가 불확실하므로 공식 hook이 있다고 fail-close하며, 실제로 미해결인 underlying probe는 runtime당 하나만 허용하고 늦은 결과를 새 epoch에 적용하지 않습니다. marker가 없는 정상 regular source와 확인된 부재, 정확한 `CMUX_PI_HOOKS_DISABLED=1`만 hook 부재로 처리합니다. 공식 hook이 감지되거나 authority가 불확실하면 이 패키지는 native lifecycle/opt-in hook 대체 기능을 보내지 않습니다. buffered `pi-subagent` success의 native notification/flash도 억제하되, 집계 error는 policy·capability가 허용하면 한 번 보낼 수 있습니다. precedence를 무시하는 중복 출력을 추가하지 않습니다.
 - 검토한 child profile은 정확한 `PI_CMUX_PROFILE=subagent-child-v1`와 channel별 exact disable만 해석합니다. partial·malformed `PI_CMUX_*` 값이나 `PI_CMUX_SIDEBAR_SOURCE`로 다른 suppression을 추론하지 않고, sidebar/status·progress·log를 끄지 않습니다.
@@ -118,7 +120,12 @@ push와 pull request CI는 provider credential, live cmux socket 또는 acceptan
 
 | lane | Bun | Pi development graph | install |
 | --- | --- | --- | --- |
-| locked baseline | 1.3.14 (`packageManager`) | `pi-coding-agent` exact 0.84.4 lockfile graph | `bun install --frozen-lockfile` |
-| current compatibility | 1.4.2 | 선언된 Pi devDependency를 exact 0.85.1로 선택한 임시 graph | `bun install --no-save` |
+| locked baseline | 1.3.14 (`packageManager`) | exact 0.99.2 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | installed host와 같은 exact 0.99.2 임시 graph | `bun install --no-save` |
+| legacy compatibility | 1.4.2 | exact 0.85.1 임시 graph | `bun install --no-save` |
 
-각 lane의 repository 설치 graph verifier는 Bun의 hoisted link와 `.bun` store 안의 nested symlink를 모두 순회해 설치된 모든 `@earendil-works/pi-*` 버전을 확인합니다. locked baseline은 Pi stack 이름별 `0.84.4` mapping을, current lane은 `0.85.1` mapping을 사용하며, 선택된 mapping의 모든 package는 정확한 버전으로 설치되어야 합니다. 별도로 tarball smoke의 격리 consumer는 wildcard 또는 transitive drift를 막는 결정적 호환성 harness로서 선택된 전체 exact Pi graph와 선언된 non-Pi peer를 의도적으로 주입합니다. 이는 최소 peer 설치를 증명하는 검사는 아닙니다. current lane은 optional peer `*`가 최신 Pi를 우연히 고르지 않도록 CI의 임시 manifest에서 모든 선언된 Pi 개발 패키지를 exact `0.85.1`로 바꿉니다. 마지막에 manifest와 lockfile은 원래 상태인지 검사하므로 lockfile 변경을 만들지 않습니다. 이는 hosted CI에서 구성할 검증이며, 로컬 재설치·다운로드 또는 live cmux 호환성 실행 결과는 아닙니다.
+baseline/current graph는 `@earendil-works/`의 `chord`, `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-coding-agent`, `pi-mcp`, `pi-telemetry`, `pi-tui`입니다. current runtime에 없는 `pi-client`/`pi-protocol`을 요구하지 않습니다. legacy graph는 `chord`, `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-telemetry`, `pi-tui`입니다. `pi-client`/`pi-protocol`은 legacy host에서도 개발 전용 패키지이므로 주입하지 않습니다. legacy lane은 optional peer를 쓰는 기존 host의 회귀를 확인하기 위한 것이며, `agent_settled` 없는 host를 지원하는 code workaround가 아닙니다.
+
+repository graph verifier는 Bun의 hoisted link와 `.bun` store 안의 nested symlink를 모두 순회해 모든 `@earendil-works/pi-*`와 `chord`가 선택한 mapping에 있고 exact version 하나만 설치되었는지 확인합니다. tarball smoke의 격리 consumer도 같은 exact graph와 선언된 non-Pi peer를 주입해 wildcard/transitive drift를 막습니다. 이는 최소 peer 설치나 실제 Pi engine lifecycle을 증명하는 검사는 아니며 registration stub import 검사입니다. compatibility lane은 임시 manifest에서 기존 Pi/chord 개발 graph를 모두 제거한 뒤 해당 mapping을 주입합니다. 마지막에 manifest와 lockfile 복원을 검사하므로 compatibility 실행이 lockfile 변경을 만들지 않습니다.
+
+검증 helper는 `.github/scripts/verify-pi-graph.ts`와 `.github/scripts/package-smoke.ts`입니다. workflow의 lane `pi-graph` JSON을 `PI_GRAPH_EXPECTED`로 전달해 graph 검증, 두 helper의 `--self-test`, smoke의 `--existing` 및 tarball smoke(인수 없음)를 실행할 수 있습니다. live cmux, 실제 provider/engine continuation, 설치된 global Pi package 변경은 이 검사의 범위 밖입니다.

@@ -512,8 +512,10 @@ export class PresenceRuntime {
       // A timeout fence belongs only to its original parent run.
       if (this.fencedParentRun !== this.parentRunRevision) this.fencedParentRun = null;
       this.usage = new UsageTracker();
-      this.hadToolError = false;
     }
+    // A continuation preserves activity/usage, but its latest low-level run
+    // owns the terminal fallback rather than a handled predecessor's error.
+    this.hadToolError = false;
     this.terminal = "success";
     this.updateContextUsage();
     this.publish("running");
@@ -606,8 +608,10 @@ export class PresenceRuntime {
     let todoSuccess = false;
     try {
       if (typeof event === "object" && event !== null) {
-        const result = event as { isError?: unknown; toolName?: unknown };
-        if (result.isError === true && this.active) this.hadToolError = true;
+        const result = event as { isError?: unknown; toolName?: unknown; parentToolCallId?: unknown };
+        // Nested failures are returned to their caller, which may handle them.
+        // Only the top-level result can mark the parent run's tool fallback.
+        if (result.parentToolCallId === undefined && result.isError === true && this.active) this.hadToolError = true;
         todoSuccess = result.toolName === "todo" && result.isError === false;
       }
     } catch {
@@ -638,11 +642,6 @@ export class PresenceRuntime {
     } catch {
       return;
     }
-    this.finalizeAgent();
-  }
-
-  /** Used only when a host rejects agent_settled registration. */
-  handleAgentEndFallback(): void {
     this.finalizeAgent();
   }
 

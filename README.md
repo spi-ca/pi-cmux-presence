@@ -6,7 +6,7 @@ Pi 세션과 같은 Pi 프로세스 안의 선택 생산자가 내는 짧은 상
 
 ## 설치
 
-`package.json`의 Pi peer dependency는 optional `*`이므로 설치 가능한 Pi 최소 버전을 메타데이터로 강제하지 않습니다. 개발 의존성과 현재 `bun.lock` 해석 버전은 exact `0.84.4`이지만, 실제 사용하는 Pi와의 호환성은 별도로 확인해야 합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
+`package.json`의 Pi peer dependency는 optional `*`이므로 설치 가능한 Pi 최소 버전을 메타데이터로 강제하지 않습니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `0.99.2`이며, `0.85.1`은 별도 legacy CI lane으로 유지합니다. 실제 사용하는 Pi와의 호환성은 별도로 확인해야 합니다. `cmux`가 제공한 `CMUX_WORKSPACE_ID`·`CMUX_SURFACE_ID`와 현재 사용자만 접근할 수 있는 Unix 소켓 환경이 필요합니다. 이 패키지는 `private: true`이므로 npm 설치를 제공하거나 안내하지 않습니다.
 
 Pi extension을 포함한 제3자 패키지는 **full system access**로 실행됩니다. 설치 전 소스와 Git ref를 검토하고 신뢰할 수 있는 패키지만 설치하세요.
 
@@ -44,7 +44,7 @@ pi install -l /absolute/path/to/pi-cmux-presence
 - 상태 키는 `surfaceId:sourceId`를 SHA-256으로 해시한 `pi-presence:<hash>`입니다. `set_status`는 해당 surface의 `--panel=<CMUX_SURFACE_ID>`를 포함하므로 상태 표시는 surface 범위입니다.
 - 상태별 cmux 스타일은 `idle`(gray/circle/10), `waiting`(amber/clock/20), `running`(blue/play/30), `success`(green/check/20), `error`(red/x/40), `cancelled`(gray/minus/20)입니다.
 - 내장 Pi lifecycle 관찰은 기본 활성(`PI_CMUX_PRESENCE_NATIVE_LIFECYCLE=true`)입니다. Pi PID와 `running`/`idle` lifecycle을 panel 범위로 보냅니다. `idle`은 cmux가 Pi가 유휴 상태임을 알 수 있게 하는 관찰 신호일 뿐, 이 패키지가 surface를 hibernate·resume하거나 Pi 작업을 제어한다는 뜻은 아닙니다.
-- 최종 상태는 settlement를 의미하는 `agent_settled`에서 확정합니다. host context가 `isIdle()`을 제공해 명시적으로 `false`를 반환하면 확정하지 않으며, host가 그 hook 등록을 지원하지 않을 때만 `agent_end` fallback을 사용합니다. assistant 토큰, 양수 비용, 가능한 context 사용률과 `tool_result.isError`를 반영합니다. 내장 Pi 이벤트는 progress를 추정하지 않습니다.
+- 최종 상태는 `agent_settled`에서만 확정합니다. `agent_end` 뒤 retry·compaction·queued work·`agent_before_settle` continuation 중에는 running을 유지하며 fallback으로 완료를 추정하지 않습니다. host context의 `isIdle()`이 명시적으로 false이면 확정하지 않습니다. assistant usage와 top-level `tool_result.isError`를 반영하되, `parentToolCallId`가 있는 nested error는 caller가 처리할 수 있으므로 부모 실패로 간주하지 않습니다. 내장 Pi 이벤트는 progress를 추정하지 않습니다.
 - host session ID가 이벤트 계약의 safe text 조건(1–96 Unicode code points)을 만족하지 않거나 조회 중 오류가 나면 해당 세션의 presence를 fail-closed로 비활성화하고 기존에 소유한 출력을 정리합니다. Pi lifecycle 오류로 전파하지 않습니다.
 - 상태·progress·notification·auto-title 문자열은 control/bidi 문자를 정규화하고 Unicode code point를 자르지 않으면서 설정의 글자 수와 목적지별 UTF-8 byte 한도를 모두 만족하도록 축약합니다.
 - 모든 관찰 쓰기는 best-effort입니다. 소켓 오류·시간 초과·큐 포화·응답 오류는 Pi 작업을 실패시키지 않으며 해당 출력만 유실될 수 있습니다. status·progress·meta는 client별 lane에서 동일한 encoded write(성공한 clear 포함)를 공유하고 실패 시에만 재시도하며, 변경된 write는 계속 전송합니다. 같은 key로 대기 중인 UI 쓰기는 하나의 promise를 공유하며 최신 요청으로 교체되는 latest-write-wins 방식으로 병합되고, 이미 실행 중인 요청은 교체하지 않습니다. opt-in feed edge는 key로 병합하지 않는 낮은 우선순위 항목이므로 FIFO prefix만 보존하며, 대기 중인 primary 출력이 있으면 그 앞에 배치되거나 자리를 내줍니다. 이는 소켓 **전송** 병합이며, `pi-subagent`의 terminal 집계·시간 창 병합과는 별개입니다.
@@ -77,7 +77,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 ## Shared presence contract
 
-공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
+공유 presence의 protocol·lifecycle·terminal semantics는 고정 tag의 [canonical Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/terminal-batch.md)를 기준으로 합니다. 이 패키지는 이를 재정의하지 않고 cmux projection, presentation, socket policy와 observer authority만 다룹니다.
 
 ## 개인정보와 전송 범위
 
