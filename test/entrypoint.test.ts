@@ -66,14 +66,13 @@ const externalProducers = new Set<
 const externalConsumers = new Set<
 	NonNullable<ReturnType<typeof createPresenceConsumer>>
 >();
-function pi(rejectSettled = false) {
+function pi() {
 	const hooks = new Map<string, Hook[]>(),
 		listeners = new Map<string, ((p: unknown) => unknown)[]>(),
 		emitted: { name: string; payload: unknown }[] = [];
 	const api = {
 		getAllTools: () => [],
 		on(name: string, fn: Hook) {
-			if (rejectSettled && name === "agent_settled") throw Error("unsupported");
 			hooks.set(name, [...(hooks.get(name) ?? []), fn]);
 		},
 		events: {
@@ -299,13 +298,14 @@ test("disabled mode registers nothing", () => {
 		r();
 	}
 });
-test("agent_settled fallback is used when registration throws", async () => {
-	const host = pi(true);
+test("an idle agent_end without agent_settled never emits completion", async () => {
+	const host = pi();
 	extension(host.api as never);
-	await host.life("session_start", {}, ctx("fallback"));
+	await host.life("session_start", {}, ctx("end-not-settled"));
 	await host.life("agent_start");
-	await host.life("agent_end", { messages: [{ stopReason: "stop" }] });
-	expect(host.emitted.some((e) => e.name === EVENT_NAMES.terminal)).toBe(true);
+	await host.life("agent_end", { messages: [{ stopReason: "stop" }] }, { isIdle: () => true });
+	expect(host.emitted.some((e) => e.name === EVENT_NAMES.terminal)).toBe(false);
+	expect(host.emitted.filter((e) => e.name === EVENT_NAMES.state).at(-1)?.payload).toMatchObject({ state: "running" });
 	await host.life("session_shutdown");
 });
 test("non-idle settlement does not emit a terminal", async () => {
@@ -329,6 +329,99 @@ test("idle settlement uses an explicit V2 terminal", async () => {
 	expect(host.emitted.some((e) => e.name === EVENT_NAMES.terminal)).toBe(true);
 	await host.life("session_shutdown");
 });
+for (const ending of ["toolUse", "no-assistant"] as const) {
+	for (const parentFailed of [false, true]) {
+		test(`nested errors defer to the ${parentFailed ? "failed" : "successful"} parent (${ending})`, async () => {
+			const host = pi();
+			extension(host.api as never);
+			await host.life("session_start", {}, ctx("nested-results"));
+			await host.life("agent_start");
+			await host.life("tool_result", {
+				toolCallId: "parent/1/1", parentToolCallId: "parent/1", toolName: "read", isError: true,
+				content: [{ type: "text", text: "NESTED_ERROR_CANARY /private/path" }],
+			});
+			await host.life("tool_result", {
+				toolCallId: "parent/1", parentToolCallId: "parent", toolName: "wrapper", isError: true,
+			});
+			await host.life("tool_result", { toolCallId: "parent", toolName: "codemode", isError: parentFailed });
+			await host.life("agent_end", { messages: ending === "toolUse" ? [{ role: "assistant", stopReason: "toolUse" }] : [] });
+			expect(host.emitted.some((event) => event.name === EVENT_NAMES.terminal)).toBe(false);
+			await host.life("agent_settled");
+			expect(host.emitted.filter((event) => event.name === EVENT_NAMES.terminal)).toHaveLength(1);
+			expect(host.emitted.find((event) => event.name === EVENT_NAMES.terminal)?.payload).toMatchObject({
+				outcome: parentFailed ? "failed" : "completed",
+			});
+			expect(JSON.stringify(host.emitted)).not.toContain("NESTED_ERROR_CANARY");
+			await host.life("session_shutdown");
+		});
+	}
+}
+
+test("continuations stay running and emit one terminal/Stop/notification only after settlement", async () => {
+	const c = await cmux(["notification.create_for_surface", "feed.push"]);
+	try {
+		process.env.CMUX_PI_HOOKS_DISABLED = "1";
+		process.env.PI_CMUX_PRESENCE_NOTIFY_POLICY = "settled";
+		process.env.PI_CMUX_PRESENCE_FEED = "true";
+		process.env.PI_CMUX_PRESENCE_META_BLOCK = "true";
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx("continuation"));
+		await host.life("agent_start");
+		await waitFor(() => c.lines.some((line) => line.includes("Pi · Writing response")));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const baseline = c.lines.length;
+		await host.life("tool_result", { toolCallId: "retry-parent", toolName: "wrapper", isError: true });
+		// Recovery/retry and an agent_before_settle-requested continuation both
+		// end a low-level run, not the parent activity. No willRetry flag is
+		// available on extension agent_end events, even for recovery.
+		for (const stopReason of ["error", "length", "stop"]) {
+			await host.life("message_end", { message: { role: "assistant", usage: { totalTokens: 10 } } });
+			await host.life("agent_end", { messages: [{ role: "assistant", stopReason }] }, { isIdle: () => true });
+			await host.life("agent_before_settle");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(host.emitted.some((event) => event.name === EVENT_NAMES.terminal)).toBe(false);
+			expect(c.requests().filter((request) => request.method === "notification.create_for_surface")).toHaveLength(0);
+			expect(c.requests().some((request) => (request.params.event as { hook_event_name?: string })?.hook_event_name === "Stop")).toBe(false);
+			expect(c.lines.slice(baseline).some((line) => /Response ready|Needs attention|clear_status|set_agent_lifecycle pi idle/.test(line))).toBe(false);
+			await host.life("agent_start");
+			await host.life("turn_start");
+		}
+		await host.life("tool_execution_start", {
+			toolCallId: "parent/1", parentToolCallId: "parent", toolName: "read",
+			args: { path: "NESTED_ARGUMENT_CANARY /private/path" },
+		});
+		await host.life("tool_execution_end", {
+			toolCallId: "parent/1", parentToolCallId: "parent", toolName: "read", isError: true,
+			result: { content: [{ type: "text", text: "HANDLED_CHILD_ERROR_CANARY /private/path" }] },
+		});
+		await host.life("tool_result", {
+			toolCallId: "parent/1", parentToolCallId: "parent", toolName: "read", isError: true,
+			content: [{ type: "text", text: "HANDLED_CHILD_ERROR_CANARY /private/path" }],
+		});
+		await host.life("tool_result", { toolCallId: "parent", toolName: "codemode", isError: false });
+		await host.life("agent_end", { messages: [{ role: "assistant", stopReason: "toolUse" }] });
+		await host.life("agent_settled", {}, { isIdle: () => true });
+		await host.life("agent_settled", {}, { isIdle: () => true });
+		await waitFor(() => c.requests().some((request) => (request.params.event as { hook_event_name?: string })?.hook_event_name === "Stop"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(host.emitted.filter((event) => event.name === EVENT_NAMES.terminal)).toHaveLength(1);
+		expect(host.emitted.find((event) => event.name === EVENT_NAMES.terminal)?.payload).toMatchObject({ outcome: "completed" });
+		expect(c.requests().filter((request) => request.method === "notification.create_for_surface")).toHaveLength(1);
+		expect(c.requests().find((request) => request.method === "notification.create_for_surface")?.params).toMatchObject({ title: "Pi", body: "Response ready" });
+		expect(c.requests().filter((request) => (request.params.event as { hook_event_name?: string })?.hook_event_name === "Stop")).toHaveLength(1);
+		const meta = c.lines.filter((line) => line.startsWith("report_meta_block ")).at(-1)!;
+		expect(meta.slice(meta.indexOf(" -- ") + 4).split("\\n")).toEqual(["0", "1", "0", "0", "0", "0", "30", "0.00", "0"]);
+		expect(c.lines.join("\n")).not.toContain("HANDLED_CHILD_ERROR_CANARY");
+		expect(c.lines.join("\n")).not.toContain("NESTED_ARGUMENT_CANARY");
+		// Slash-delimited nested ids are not in the opt-in feed token allowlist.
+		expect(c.lines.join("\n")).not.toContain("parent/1");
+		await host.life("session_shutdown");
+	} finally {
+		await c.close();
+	}
+});
+
 test("a later successful assistant stop publishes a completed terminal after a tool error", async () => {
 	const host = pi();
 	extension(host.api as never);

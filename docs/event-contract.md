@@ -12,9 +12,9 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 이 패키지가 고정한 의존성 tag의 문서가 shared presence 계약의 유일한 기준입니다.
 
-- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md) — 채널과 strict DTO
-- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md) — producer/consumer activation과 retained state
-- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md) — live terminal batching
+- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/protocol.md) — 채널과 strict DTO
+- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/lifecycle.md) — producer/consumer activation과 retained state
+- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/terminal-batch.md) — live terminal batching
 
 공유 protocol의 parser, registry, receipt, replay, source occupancy와 ordering fence는
 이 저장소의 cmux 정책이 아닙니다. 해당 의미를 바꾸는 변경은 이 consumer가 아니라
@@ -37,6 +37,20 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 - withdrawal로 표시된 retained projection이 사라지면 해당 status를 clear하고 남은
   projection으로 progress와 opt-in meta block을 다시 계산합니다. 이 동작은 새 alert나
   feed를 만들지 않습니다.
+
+## Pi host lifecycle 관찰
+
+개발·current CI graph는 installed Pi `0.99.2`와 exact 동기화하며,
+`0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
+low-level run의 경계이므로 retry, compaction recovery, queued work 또는
+`agent_before_settle` continuation 뒤의 `agent_settled`까지 부모 activity와 usage를
+유지합니다. terminal·completion attention·feed `Stop`·final clear는 settlement에서만
+한 번 처리하며, hook 지원 여부를 추측하는 `agent_end` fallback은 없습니다.
+
+`parentToolCallId`가 있는 nested `tool_result`의 error는 caller가 처리할 수 있으므로
+부모 실패로 누적하지 않습니다. top-level 실패는 최신 low-level run의 fallback에 반영하고, 이후 완료
+assistant 응답은 recovery로 처리합니다. tool-only ending은 top-level 실패를 숨기지
+않습니다. 이 관찰은 tool 실행·retry authority나 새 개인정보 전송 경로를 추가하지 않습니다.
 
 ## authority와 실패 격리
 

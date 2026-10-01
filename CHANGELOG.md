@@ -1,6 +1,13 @@
 # 변경 이력
 
-## Unreleased
+## v20261001-1
+
+### Pi 0.99.2 호환성
+
+- installed Pi host와 개발 의존성·lockfile·current CI graph를 exact `0.99.2`로 정렬했습니다. 현재 runtime의 `chord`, `pi-codemode`, `pi-mcp`를 포함하고 더 이상 runtime dependency가 아닌 `pi-client`/`pi-protocol`은 current graph에서 제외합니다. `0.85.1`은 별도 legacy CI lane으로 유지하며 runtime shim을 추가하지 않습니다.
+- `agent_end` fallback을 제거해 retry·compaction·queued work·`agent_before_settle` continuation 동안 완료를 잘못 발행하지 않습니다. 최종 terminal·attention·feed `Stop`·sidebar clear는 `agent_settled`에서만 처리합니다.
+- `parentToolCallId`가 있는 nested tool error는 부모 실패로 누적하지 않습니다. top-level 실패는 최신 low-level run의 tool-only ending에서 유지하고, 이후 완료 assistant 응답과 continuation은 이전 error flag에서 recovery할 수 있습니다.
+- idle low-level ending, continuation의 exactly-once terminal/notification/feed와 usage 누적, multi-depth nested 실패를 처리한 성공 부모 및 실패 부모의 회귀를 추가했습니다. socket-only, fixed/private presentation과 producer authority 경계를 유지하며 Herdr 기능은 추가하지 않습니다.
 
 ## v20260907-3 — 2026-09-07
 

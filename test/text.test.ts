@@ -165,5 +165,8 @@ describe("UTF-8 bounded presence text", () => {
     expect(deriveTerminalState([{ stopReason: "error" }, { stopReason: "stop" }], true)).toBe("success");
     expect(deriveTerminalState([{ stopReason: "error" }, { stopReason: "aborted" }], false)).toBe("cancelled");
     expect(deriveTerminalState([{ stopReason: "stop" }, { stopReason: "error" }], false)).toBe("error");
+    expect(deriveTerminalState([{ stopReason: "toolUse" }], true)).toBe("error");
+    expect(deriveTerminalState([{ stopReason: "toolUse" }], false)).toBe("success");
+    expect(deriveTerminalState([{ stopReason: "toolUse" }, { stopReason: "stop" }], true)).toBe("success");
   });
 });

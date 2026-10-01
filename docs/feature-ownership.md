@@ -5,21 +5,24 @@
 발행할 수 있지만, 이 패키지는 그 producer를 import·실행·제어하지 않습니다.
 
 공유 presence protocol과 lifecycle의 canonical 기준은 고정 tag의
-[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/protocol.md),
-[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md),
-[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/terminal-batch.md)입니다.
+[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/protocol.md),
+[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/lifecycle.md),
+[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/terminal-batch.md)입니다.
 
 ## 구현 범위
 
 | 기능 | `pi-cmux-presence` 책임 | 경계 |
 | --- | --- | --- |
-| 부모 Pi 상태·usage | lifecycle/usage를 fixed local summary로 surface status에 표시 | assistant body, prompt, path, tool content는 전송하지 않음 |
+| 부모 Pi 상태·usage | continuation을 포함한 activity를 `agent_settled`에서만 완료로 표시 | handled nested error는 부모 실패가 아니며 assistant body, prompt, path, tool content는 전송하지 않음 |
 | todo 진행률 | 검증한 todo 결과의 count와 progress를 표시 | task text를 전송하지 않음 |
 | 선택 producer 표시 | shared presence를 fixed local vocabulary와 numeric summary로 투영 | producer package의 실행 dependency나 lifecycle authority 없음 |
 | subagent completion | live completion을 cmux attention policy로 의미 있게 묶음 | cancellation은 quiet, producer result·cleanup은 producer 소유 |
 | input-required 표시 | 고정 `Pi needs your input` presentation | 모든 Pi input wait를 추론하거나 제어하지 않음 |
 | 알림·flash·log | official hook 우선 뒤 child-profile suppression, kill switch, policy, capability로 gate | cmux notification 보존과 focused-banner 표시는 cmux 소유 |
 | Pi PID/lifecycle, feed, metadata, title, resume | 공식 hook 부재 시 문서화된 opt-in fallback 제공 | 직접 cmux mutation을 producer에 요구하지 않음 |
+
+Pi `0.99.2` host compatibility 정렬은 dependency graph와 lifecycle 관찰 범위의 변경입니다.
+Herdr 전송·설정·identity·기능은 추가하지 않으며 Unix socket-only와 기존 개인정보 gate를 유지합니다.
 
 shared protocol의 validation, retention, delivery, replay, ordering과 source lifecycle은
 `@pi/presence`의 책임입니다. 이 consumer는 유효한 input을 cmux UI로 렌더링할 뿐,
