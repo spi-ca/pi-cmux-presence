@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `0.99.2`입니다. Pi stack의 caret transitive drift를 막기 위해 `chord`와 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정합니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.0.2`입니다. Pi stack의 caret transitive drift를 막기 위해 `chord`와 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정합니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -78,7 +78,7 @@ bun run diagram:render
 - progress가 비활성일 때는 초기화·종료 cleanup도 보내지 않습니다. 활성화된 progress는 workspace 전역 슬롯이므로 session teardown과 startup을 직렬화합니다. startup 소켓 경로 검증은 client ownership 전에 request timeout으로 제한하고 session epoch abort와 race하므로 replacement/shutdown이 느린 filesystem 작업을 기다리지 않습니다. deadline/abort 후에도 남은 resolver는 settle 전까지 독점되어 다음 epoch가 새 filesystem 검증을 시작할 수 없고, stale 결과는 재사용하지 않습니다. transport는 실제 post-connect fingerprint가 미해결인 동안의 request write 전 data/end/close/error만 response로 수락하지 않고 즉시 fail-close합니다. runtime-owned fingerprint lease gate는 replacement를 포함한 모든 runtime transport에서 미해결 filesystem validation 하나만 허용하며 stale lease가 settle될 때까지 새 validation을 거부하지만, transport는 항상 module-intrinsic `safeSocketFingerprint`를 직접 실행합니다. standalone transport도 자체 gate를 만들어 같은 보장을 유지합니다. 연결 전 connect error/timeout과 post-write 응답 timeout은 현재 요청만 실패시키고 queue를 close하지 않습니다. capability probe와 owned-progress 초기화 중 생성된 client도 즉시 runtime ownership에 등록해 replacement/shutdown이 같은 제한된 teardown barrier에서 close·await해야 합니다. owned-progress 초기화는 그 ownership이 확립된 뒤에만 실행합니다.
 - 전송 text를 추가하면 `src/protocol.ts`의 목적지별 UTF-8 byte 한도와 `src/text.ts`의 Unicode-safe 축약을 함께 적용합니다.
 - status key는 surface를 포함해 해시하고 `set_status`는 해당 surface panel에 범위 지정합니다. 새 local presentation을 추가하면 style·priority와 privacy/byte-bound 테스트를 함께 갱신합니다.
-- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261001-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
+- shared presence protocol, lifecycle, terminal batching은 고정 tag의 [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/protocol.md), [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/lifecycle.md), [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/terminal-batch.md)를 기준으로 합니다. 이 저장소는 shared protocol을 복제하지 않으며 cmux projection과 local presentation policy만 변경합니다. subagent completion에는 그 policy의 누적 attention만 적용합니다.
 - todo adapter는 descriptive task text나 tool result text를 보관·전송하지 않습니다. provenance와 deleted-task 제외 규칙을 약화하지 않습니다.
 - `agent_end`는 최종 settlement가 아닙니다. retry·compaction·queued work·`agent_before_settle` continuation은 `agent_settled`까지 같은 부모 activity/usage로 유지하고, terminal·completion attention·feed `Stop`·final clear를 중간에 발행하지 않습니다. registration throw로 hook 지원 여부를 추측하는 fallback을 추가하지 않습니다.
 - `parentToolCallId`가 있는 nested `tool_result` error는 caller-owned이며 처리된 child error로 부모 실패를 만들지 않습니다. top-level failure fallback과 이후 완료 assistant recovery를 구분하고 tool-only ending이 top-level error를 숨기지 않게 합니다. 성공 nested todo도 기존 provenance/privacy gate를 유지합니다.
@@ -120,8 +120,8 @@ push와 pull request CI는 provider credential, live cmux socket 또는 acceptan
 
 | lane | Bun | Pi development graph | install |
 | --- | --- | --- | --- |
-| locked baseline | 1.3.14 (`packageManager`) | exact 0.99.2 lockfile graph | `bun install --frozen-lockfile` |
-| current compatibility | 1.4.2 | installed host와 같은 exact 0.99.2 임시 graph | `bun install --no-save` |
+| locked baseline | 1.3.14 (`packageManager`) | exact 1.0.2 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | installed host와 같은 exact 1.0.2 임시 graph | `bun install --no-save` |
 | legacy compatibility | 1.4.2 | exact 0.85.1 임시 graph | `bun install --no-save` |
 
 baseline/current graph는 `@earendil-works/`의 `chord`, `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-coding-agent`, `pi-mcp`, `pi-telemetry`, `pi-tui`입니다. current runtime에 없는 `pi-client`/`pi-protocol`을 요구하지 않습니다. legacy graph는 `chord`, `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-telemetry`, `pi-tui`입니다. `pi-client`/`pi-protocol`은 legacy host에서도 개발 전용 패키지이므로 주입하지 않습니다. legacy lane은 optional peer를 쓰는 기존 host의 회귀를 확인하기 위한 것이며, `agent_settled` 없는 host를 지원하는 code workaround가 아닙니다.
