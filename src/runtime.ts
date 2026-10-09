@@ -632,13 +632,17 @@ export class PresenceRuntime {
     if (todoEvent) this.publishTodo(todoEvent);
   }
 
-  handleAgentSettled(context: unknown): void {
+  handleAgentSettled(context: unknown, event?: unknown): void {
     this.activateLocalProducers();
     try {
       if (typeof context === "object" && context !== null) {
         const isIdle = (context as { isIdle?: unknown }).isIdle;
         if (typeof isIdle === "function" && !isIdle.call(context)) return;
       }
+      // Cancellation can occur after the last assistant completed (for example
+      // during a tool or recovery wait). The final run signal takes precedence.
+      if (!types.isProxy(event) && typeof event === "object" && event !== null
+        && (event as { aborted?: unknown }).aborted === true) this.terminal = "cancelled";
     } catch {
       return;
     }

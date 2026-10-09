@@ -5,9 +5,9 @@ Pi runtime에서 활성화되어 shared presence를 전달할 때만 이 optiona
 subagent 상태와 completion을 cmux에 투영합니다.
 
 shared protocol, activation lifecycle, live terminal batching의 immutable 기준은 각각
-[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/protocol.md),
-[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/lifecycle.md),
-[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/terminal-batch.md)입니다.
+[Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/protocol.md),
+[Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/lifecycle.md),
+[Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/terminal-batch.md)입니다.
 
 ## cmux behavior
 

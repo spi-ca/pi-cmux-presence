@@ -12,9 +12,9 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 이 패키지가 고정한 의존성 tag의 문서가 shared presence 계약의 유일한 기준입니다.
 
-- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/protocol.md) — 채널과 strict DTO
-- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/lifecycle.md) — producer/consumer activation과 retained state
-- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/terminal-batch.md) — live terminal batching
+- [Protocol](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/protocol.md) — 채널과 strict DTO
+- [Lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/lifecycle.md) — producer/consumer activation과 retained state
+- [Terminal batches](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/terminal-batch.md) — live terminal batching
 
 공유 protocol의 parser, registry, receipt, replay, source occupancy와 ordering fence는
 이 저장소의 cmux 정책이 아닙니다. 해당 의미를 바꾸는 변경은 이 consumer가 아니라
@@ -40,12 +40,21 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 ## Pi host lifecycle 관찰
 
-개발·current CI graph는 installed Pi `1.0.2`와 exact 동기화하며,
+개발·current CI graph는 installed Pi `1.1.0`와 exact 동기화하며,
 `0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
 low-level run의 경계이므로 retry, compaction recovery, queued work 또는
 `agent_before_settle` continuation 뒤의 `agent_settled`까지 부모 activity와 usage를
 유지합니다. terminal·completion attention·feed `Stop`·final clear는 settlement에서만
 한 번 처리하며, hook 지원 여부를 추측하는 `agent_end` fallback은 없습니다.
+
+Pi `1.1.0`의 `agent_settled.aborted === true`는 마지막 assistant 상태와 무관하게
+기존 `cancelled` outcome으로 처리합니다. 필드가 없는 이전 이벤트는 기존 파생 판정을
+유지하며, 취소는 여전히 status-only입니다. 부모 취소는 별도 subagent job의 취소
+권한이나 shared protocol 변경을 뜻하지 않습니다.
+
+Pi 자체 OSC 7501 program status는 별도 터미널 기능입니다. 이 consumer는 이를
+중복 송신하거나 socket projection을 대체하지 않습니다. tmux/screen 경로에서는 Pi의
+자동 보고가 전달되지 않을 수 있으며 강제 활성화를 여기서 수행하지 않습니다.
 
 `parentToolCallId`가 있는 nested `tool_result`의 error는 caller가 처리할 수 있으므로
 부모 실패로 누적하지 않습니다. top-level 실패는 최신 low-level run의 fallback에 반영하고, 이후 완료
