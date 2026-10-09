@@ -298,6 +298,23 @@ test("disabled mode registers nothing", () => {
 		r();
 	}
 });
+test("settled abort overrides a completed assistant and emits one cancelled terminal", async () => {
+	for (const stopReason of ["stop", "toolUse", "error"]) {
+		const host = pi();
+		extension(host.api as never);
+		await host.life("session_start", {}, ctx(`settled-abort-${stopReason}`));
+		await host.life("agent_start");
+		await host.life("agent_end", { messages: [{ role: "assistant", stopReason }] });
+		await host.life("agent_settled", { aborted: true }, { isIdle: () => false });
+		expect(host.emitted.filter((event) => event.name === EVENT_NAMES.terminal)).toHaveLength(0);
+		await host.life("agent_settled", { aborted: true });
+		await host.life("agent_settled", { aborted: true });
+		expect(host.emitted.filter((event) => event.name === EVENT_NAMES.terminal)).toHaveLength(1);
+		expect(host.emitted.find((event) => event.name === EVENT_NAMES.terminal)?.payload).toMatchObject({ outcome: "cancelled" });
+		await host.life("session_shutdown");
+	}
+});
+
 test("an idle agent_end without agent_settled never emits completion", async () => {
 	const host = pi();
 	extension(host.api as never);

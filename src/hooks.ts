@@ -10,7 +10,7 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
 
   // agent_end closes only a low-level run. Retry, compaction, queued work,
   // and agent_before_settle continuations must finish before terminal output.
-  pi.on("agent_settled", (_event, context) => runtime.handleAgentSettled(context));
+  pi.on("agent_settled", (event, context) => runtime.handleAgentSettled(context, event));
 
   // Startup remains detached: the runtime establishes its epoch synchronously,
   // then fences optional output internally.
