@@ -5,7 +5,7 @@ import {
   EVENT_NAMES,
   type PresenceEventV2,
 } from "@pi/presence";
-import { adaptPresenceState, adaptPresenceTerminal, PresenceStateRegistry } from "../src/events.js";
+import { adaptPresenceState, PresenceStateRegistry } from "../src/events.js";
 import { readCmuxIdentity } from "../src/identity.js";
 import { presenceStatusKey } from "../src/presence.js";
 import { TodoProgressAdapter } from "../src/todo.js";
@@ -68,13 +68,14 @@ describe("V2 presence state", () => {
     }
   });
 
-  test("does not replay terminals and keeps terminal adapters quiet and non-authoritative", () => {
+  test("delivers terminals as live edges without replay to a late consumer", () => {
     const { producer, events, accepted, addConsumer, activate, deactivate } = v2();
     addConsumer("pi-herdr-presence");
     try {
       expect(producer.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" })).toBe(true);
       const terminal = events[0]!;
-      expect("eventId" in terminal && adaptPresenceTerminal(terminal)).toMatchObject({ source: { id: "subagent" }, state: "error", attention: "none", counts: { failed: 0 } });
+      expect(terminal).toMatchObject({ source: "subagent", eventId: 1, outcome: "failed" });
+      expect("state" in terminal).toBe(false);
 
       // The late consumer activates after the live terminal and receives none.
       expect(activate("pi-herdr-presence")).toBe(true);
@@ -92,13 +93,6 @@ describe("V2 presence state", () => {
     };
     expect(adaptPresenceState(blocked).state).toBe("error");
     expect(adaptPresenceState(blocked).attention).toBe("error");
-  });
-
-  test("terminal adapters preserve authoritative cumulative state without inventing counts", () => {
-    const terminal = { version: 2 as const, generation: 2, sequence: 9, source: "subagent" as const, eventId: 4, outcome: "failed" as const, sessionEpoch: "test" };
-    const prior = { generation: 2, sequence: 8, source: { id: "subagent", label: "Subagents", kind: "agent-group" }, state: "error" as const, counts: { active: 0, completed: 7, failed: 3 }, attention: "none" as const };
-    expect(adaptPresenceTerminal(terminal, prior).counts).toMatchObject({ completed: 7, failed: 3 });
-    expect(adaptPresenceTerminal(terminal).counts).toMatchObject({ completed: 0, failed: 0 });
   });
 
   test("withdrawal removes state and higher generation reopens it", () => {

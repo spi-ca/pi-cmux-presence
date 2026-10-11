@@ -85,32 +85,40 @@ describe("Unix socket transport", () => {
     await expect(next).resolves.toBe("ok");
     await transport.close();
   });
-  test("hard-gates unsolicited post-connect data while fingerprint validation is pending", async () => {
-    let writes = 0;
-    const path = await fixture(
-      () => { writes += 1; return "ok"; },
-      { onConnection: (socket) => { socket.write("unsolicited\\n"); } },
-    );
-    const transport = new UnixSocketTransport(path, 300, 2);
-    await expect(transport.request("request\n")).rejects.toThrow(
-      "before post-connect validation and request write",
-    );
-    expect(writes).toBe(0);
-    await expect(transport.request("later\n")).rejects.toThrow("queue is closed");
-    await transport.close();
-  });
-  test("hard-gates an unsolicited post-connect close while fingerprint validation is pending", async () => {
-    let writes = 0;
-    const path = await fixture(
-      () => { writes += 1; return "ok"; },
-      { onConnection: (socket) => { socket.end(); } },
-    );
-    const transport = new UnixSocketTransport(path, 300, 2);
-    await expect(transport.request("request\n")).rejects.toThrow("closed before a complete response");
-    expect(writes).toBe(0);
-    await expect(transport.request("later\n")).rejects.toThrow("queue is closed");
-    await transport.close();
-  });
+  for (const [event, expectedError] of [
+    ["data", "before post-connect validation and request write"],
+    ["end", "closed before a complete response"],
+  ] as const) {
+    test(`hard-gates unsolicited post-connect ${event} while fingerprint validation is pending`, async () => {
+      let writes = 0;
+      const path = await fixture(() => { writes += 1; return "ok"; });
+      const fingerprintGate = new UnresolvedSocketFingerprintGate();
+      const transport = new UnixSocketTransport(path, 300, 2, fingerprintGate);
+      const mutableNet = net as typeof net & { createConnection: (...args: unknown[]) => net.Socket };
+      const createConnection = mutableNet.createConnection;
+      mutableNet.createConnection = (...args) => {
+        const socket = createConnection(...args);
+        socket.once("connect", () => {
+          // Inject the observed event after the genuine connect listener starts
+          // intrinsic filesystem validation, not at an assumed kernel-delivery time.
+          queueMicrotask(() => {
+            expect(fingerprintGate.unresolved).toBe(true);
+            if (event === "data") socket.emit("data", "unsolicited\n");
+            else socket.emit("end");
+          });
+        });
+        return socket;
+      };
+      try {
+        await expect(transport.request("request\n")).rejects.toThrow(expectedError);
+        expect(writes).toBe(0);
+        await expect(transport.request("later\n")).rejects.toThrow("queue is closed");
+      } finally {
+        mutableNet.createConnection = createConnection;
+        await transport.close();
+      }
+    });
+  }
   test("fingerprint gate retains stale ownership and fences late release", () => {
     const gate = new UnresolvedSocketFingerprintGate();
     const stale = gate.acquire();
