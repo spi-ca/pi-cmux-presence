@@ -16,6 +16,8 @@ import {
 
 import { resolvePresenceConfig } from "../src/config.js";
 
+import type { PresenceStateRegistry } from "../src/events.js";
+
 import { registerPresenceHooks } from "../src/hooks.js";
 
 import { presenceStatusKey } from "../src/presentation.js";
@@ -881,6 +883,9 @@ test("state-before-terminal uses only the explicit terminal ordinal", async () =
 				},
 			}),
 		);
+		const registry = (runtime as unknown as { registry: PresenceStateRegistry }).registry;
+		const retainedState = registry.get("subagent");
+		expect(retainedState?.counts).toMatchObject({ active: 0, completed: 99, failed: 0 });
 
 		subagent.publishTerminal({
 			version: 2,
@@ -894,6 +899,8 @@ test("state-before-terminal uses only the explicit terminal ordinal", async () =
 
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params.body).toBe("1 completed");
+		expect(registry.get("subagent")).toBe(retainedState);
+		expect(retainedState?.counts).toMatchObject({ active: 0, completed: 99, failed: 0 });
 	} finally {
 		await close(runtime, [subagent], socket);
 	}
@@ -1649,25 +1656,45 @@ test("shutdown withdraws bounded local pi and todo sources before deactivation",
 	}
 });
 
-test("terminal-only withdrawal leaves no stale retained subagent status", async () => {
+test("terminal-only late activation and withdrawal leave no replay or retained subagent status", async () => {
 	const socket = await fixture();
-	const { pi, runtime } = await start(socket);
+	const clock = new ManualRuntimeClock();
+	const pi = bus();
+	const runtime = new PresenceRuntime(pi.api as never, resolvePresenceConfig(), clock);
+	registerPresenceHooks(pi.api as never, runtime);
 	const subagent = producer(pi, "subagent");
 
 	try {
-		subagent.publishTerminal({
+		// A terminal emitted before runtime activation must never replay as attention or state.
+		expect(subagent.publishTerminal({
 			version: 2,
 			generation: 1,
 			sequence: 0,
 			source: "subagent",
 			eventId: 0,
 			outcome: "completed",
-		});
+		})).toBe(true);
+		await runtime.startSession({ sessionManager: { getSessionId: () => "acceptance-session" } });
+		clock.advance(450);
+		expect(notifications(socket.lines)).toHaveLength(0);
+		expect(clock.timers.some(timer => !timer.cleared)).toBe(false);
+		const registry = (runtime as unknown as { registry: PresenceStateRegistry }).registry;
+		expect(registry.get("subagent")).toBeUndefined();
+
+		expect(subagent.publishTerminal({
+			version: 2,
+			generation: 1,
+			sequence: 1,
+			source: "subagent",
+			eventId: 1,
+			outcome: "completed",
+		})).toBe(true);
+		expect(registry.get("subagent")).toBeUndefined();
 		expect(
 			subagent.withdraw({
 				version: 2,
 				generation: 1,
-				sequence: 1,
+				sequence: 2,
 				source: "subagent",
 			}),
 		).toBe(true);

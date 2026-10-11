@@ -81,22 +81,5 @@ export function adaptPresenceState(event: PresenceStateV2, local?: Partial<Prese
   };
 }
 
-/**
- * Compatibility-only terminal view. Runtime terminal delivery must use the
- * explicit edge and never retain this value or derive count increments.
- */
-export function adaptPresenceTerminal(event: PresenceTerminalV2, prior?: PresenceUpdate): PresenceUpdate {
-  const presentation = prior?.generation === event.generation ? prior : undefined;
-  return {
-    generation: event.generation,
-    sequence: event.sequence,
-    source: { ...(event.source === "subagent" ? SUBAGENT_SOURCE : LOCAL_SOURCE) },
-    state: event.outcome === "completed" ? "success" : event.outcome === "failed" ? "error" : "cancelled",
-    counts: presentation?.counts ?? { active: 0, completed: 0, failed: 0 },
-    ...(presentation?.usage ? { usage: presentation.usage } : {}),
-    attention: "none",
-  };
-}
-
 export function isState(event: PresenceEventV2): event is PresenceStateV2 { return "state" in event; }
 export function isTerminal(event: PresenceEventV2): event is PresenceTerminalV2 { return "eventId" in event; }
