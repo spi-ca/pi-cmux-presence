@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { BeforeAgentStartEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { types } from "node:util";
 import {
   createPresenceConsumer,
@@ -588,10 +588,11 @@ export class PresenceRuntime {
     this.terminal = deriveTerminalState(Array.isArray(messages) ? messages : [], this.hadToolError);
   }
 
-  handleBeforeAgentStart(event: { messageType?: "user" | "custom" }): void {
+  handleBeforeAgentStart(event: BeforeAgentStartEvent): void {
     this.activateLocalProducers();
     // Old hosts omit messageType; custom-triggered runs are not user submissions.
-    if (this.sessionId && (event.messageType === undefined || event.messageType === "user")) {
+    const messageType = "messageType" in event ? event.messageType : undefined;
+    if (this.sessionId && (messageType === undefined || messageType === "user")) {
       this.queueFeedEdge("UserPromptSubmit", this.sessionId);
     }
   }
