@@ -751,6 +751,37 @@ test("feed uses a privacy-minimal V2 request", async () => {
 	}
 });
 
+for (const messageType of ["user", "custom", undefined] as const) {
+	test(`before_agent_start ${messageType ?? "legacy"} keeps activation and only feeds user submissions`, async () => {
+		const c = await cmux(["feed.push"]);
+		try {
+			process.env.PI_CMUX_PRESENCE_FEED = "true";
+			const host = pi();
+			extension(host.api as never);
+			await host.life("session_start", {}, ctx("prompt-kind"));
+			await host.life("before_agent_start", {
+				...(messageType === undefined ? {} : { messageType }),
+				prompt: "PRIVATE_USER_PROMPT",
+				message: { content: "PRIVATE_CUSTOM_MESSAGE" },
+			});
+			await host.life("agent_start");
+			// Await a later FIFO feed edge so absence is not a sleep-based assertion.
+			await host.life("tool_execution_start", { toolCallId: "call", toolName: "read" });
+			await waitFor(() => c.requests().some((r) =>
+				r.method === "feed.push" && (r.params.event as { hook_event_name: string }).hook_event_name === "PreToolUse"));
+			const submissions = c.requests().filter((r) =>
+				r.method === "feed.push" && (r.params.event as { hook_event_name: string }).hook_event_name === "UserPromptSubmit");
+			expect(submissions.length).toBe(messageType === "custom" ? 0 : 1);
+			expect(host.emitted.some((e) => e.name === EVENT_NAMES.state)).toBe(true);
+			expect(c.lines.join("\n")).not.toContain("PRIVATE_USER_PROMPT");
+			expect(c.lines.join("\n")).not.toContain("PRIVATE_CUSTOM_MESSAGE");
+			await host.life("session_shutdown");
+		} finally {
+			await c.close();
+		}
+	});
+}
+
 // Withdraw/remove behavior and retry ownership.
 test("withdraw clears retained status", async () => {
 	const c = await cmux();
