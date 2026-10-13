@@ -588,9 +588,12 @@ export class PresenceRuntime {
     this.terminal = deriveTerminalState(Array.isArray(messages) ? messages : [], this.hadToolError);
   }
 
-  handleBeforeAgentStart(): void {
+  handleBeforeAgentStart(event: { messageType?: "user" | "custom" }): void {
     this.activateLocalProducers();
-    if (this.sessionId) this.queueFeedEdge("UserPromptSubmit", this.sessionId);
+    // Old hosts omit messageType; custom-triggered runs are not user submissions.
+    if (this.sessionId && (event.messageType === undefined || event.messageType === "user")) {
+      this.queueFeedEdge("UserPromptSubmit", this.sessionId);
+    }
   }
 
   handleToolExecutionStart(event: ToolFeedEvent): void {

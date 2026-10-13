@@ -1,5 +1,11 @@
 # 변경 이력
 
+## v20261013-1
+
+- Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다. 구버전 회귀 lane은 유지합니다.
+- `before_agent_start`의 custom-message 실행을 `UserPromptSubmit`으로 기록하지 않도록 구분했습니다. 공통 활성화와 구형 host의 사용자 입력 처리는 유지합니다.
+- Shared `@pi/presence`를 immutable `v2-20261013-1`로 동기화합니다. socket-only 전송과 V2 protocol·runtime API·ABI는 유지합니다.
+
 ## v20261009-1
 
 - Shared `@pi/presence`를 immutable `v2-20261009-1`로 동기화했습니다. peeled commit·V2 protocol·ABI는 기존 `v2-20261004-1`과 같습니다.
