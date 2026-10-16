@@ -192,4 +192,4 @@ identity와 소켓 선택은 fail-closed입니다. 검증에 실패하면 cmux �
 
 5. **시간과 정리** — `PI_CMUX_PRESENCE_TIMEOUT_MS`, `PI_CMUX_PRESENCE_MAX_QUEUE`, `PI_CMUX_PRESENCE_FINAL_CLEAR_MS`가 의도한 값인지 확인합니다. progress flag가 `false`이면 초기화·종료 clear를 포함해 progress를 변경하지 않습니다.
 
-`@earendil-works/pi-coding-agent` peer dependency는 optional `*`이므로 Pi 최소 버전을 선언·강제하지 않습니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 exact `1.2.0`입니다. `0.85.1`은 `agent_settled`를 지원하는 legacy CI lane일 뿐 오래된 host를 위한 code workaround를 추가하지 않습니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.
+`@earendil-works/pi-coding-agent` peer dependency는 optional `*`이므로 Pi 최소 버전을 선언·강제하지 않습니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 exact `1.3.0`입니다. `0.85.1`은 `agent_settled`를 지원하는 legacy CI lane일 뿐 오래된 host를 위한 code workaround를 추가하지 않습니다. 이 패키지는 특정 cmux 버전을 고정하거나 실제 서버 호환성을 자동 보장하지 않습니다.

@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.2.0`입니다. Pi stack의 caret transitive drift를 막기 위해 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.3.0`입니다. Pi stack의 caret transitive drift를 막기 위해 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -120,8 +120,8 @@ push와 pull request CI는 provider credential, live cmux socket 또는 acceptan
 
 | lane | Bun | Pi development graph | install |
 | --- | --- | --- | --- |
-| locked baseline | 1.3.14 (`packageManager`) | exact 1.2.0 lockfile graph | `bun install --frozen-lockfile` |
-| current compatibility | 1.4.2 | installed host와 같은 exact 1.2.0 임시 graph | `bun install --no-save` |
+| locked baseline | 1.3.14 (`packageManager`) | exact 1.3.0 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | installed host와 같은 exact 1.3.0 임시 graph | `bun install --no-save` |
 | legacy compatibility | 1.4.2 | exact 0.85.1 임시 graph | `bun install --no-save` |
 
 baseline/current graph는 `@earendil-works/`의 `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-coding-agent`, `pi-mcp`, `pi-telemetry`, `pi-tui`입니다. current runtime에 없는 `chord`/`pi-client`/`pi-protocol`을 요구하지 않습니다. legacy graph는 `chord`, `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-telemetry`, `pi-tui`입니다. `pi-client`/`pi-protocol`은 legacy host에서도 개발 전용 패키지이므로 주입하지 않습니다. legacy lane은 optional peer를 쓰는 기존 host의 회귀를 확인하기 위한 것이며, `agent_settled` 없는 host를 지원하는 code workaround가 아닙니다.
