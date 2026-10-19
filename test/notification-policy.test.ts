@@ -51,14 +51,14 @@ describe("notification policy", () => {
     expect(remainingErrorDeadlineMs(10_000, 9_900)).toBe(100);
     expect(remainingErrorDeadlineMs(10_000, 10_001)).toBe(0);
     expect(formatSubagentAttention("error", 2, 1, { timeout: true }, 96)).toMatchObject({
-      title: "Subagent failed",
-      body: "2 completed · 1 failed · Parent is processing results",
+      title: "Subagents · ✗ Failed",
+      body: "Subagents · ✗ Failed · 2 completed · 1 failed · Deferred summary",
     });
     expect(formatSubagentAttention("success", 0, 0, { parentSucceeded: true }, 96)).toMatchObject({
-      title: "Pi response ready",
-      body: "Subagent task completed",
+      title: "Pi · ✓ Completed",
+      body: "Subagents · ✓ Completed",
     });
-    expect(formatSubagentAttention("success", 3, 0, { parentSucceeded: true }, 96).body).toBe("Subagents: 3 completed");
+    expect(formatSubagentAttention("success", 3, 0, { parentSucceeded: true }, 96).body).toBe("Subagents · ✓ Completed · 3 completed");
   });
 
   test("applies exact global notify and flash policy semantics", () => {

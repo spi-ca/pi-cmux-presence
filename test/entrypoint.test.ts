@@ -280,7 +280,7 @@ test("stalled socket setup does not block lifecycle callbacks or lose an early t
 
 		release();
 		await waitFor(() => c.lines.some((line) =>
-			line.startsWith("set_status ") && line.includes("Pi · Response ready"),
+			line.startsWith("set_status ") && line.includes("Pi · ✓ Completed"),
 		));
 	} finally {
 		release?.();
@@ -385,7 +385,7 @@ test("continuations stay running and emit one terminal/Stop/notification only af
 		extension(host.api as never);
 		await host.life("session_start", {}, ctx("continuation"));
 		await host.life("agent_start");
-		await waitFor(() => c.lines.some((line) => line.includes("Pi · Writing response")));
+		await waitFor(() => c.lines.some((line) => line.includes("Pi · Running")));
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		const baseline = c.lines.length;
 		await host.life("tool_result", { toolCallId: "retry-parent", toolName: "wrapper", isError: true });
@@ -400,7 +400,7 @@ test("continuations stay running and emit one terminal/Stop/notification only af
 			expect(host.emitted.some((event) => event.name === EVENT_NAMES.terminal)).toBe(false);
 			expect(c.requests().filter((request) => request.method === "notification.create_for_surface")).toHaveLength(0);
 			expect(c.requests().some((request) => (request.params.event as { hook_event_name?: string })?.hook_event_name === "Stop")).toBe(false);
-			expect(c.lines.slice(baseline).some((line) => /Response ready|Needs attention|clear_status|set_agent_lifecycle pi idle/.test(line))).toBe(false);
+			expect(c.lines.slice(baseline).some((line) => /✓ Completed|✗ Failed|clear_status|set_agent_lifecycle pi idle/.test(line))).toBe(false);
 			await host.life("agent_start");
 			await host.life("turn_start");
 		}
@@ -425,7 +425,7 @@ test("continuations stay running and emit one terminal/Stop/notification only af
 		expect(host.emitted.filter((event) => event.name === EVENT_NAMES.terminal)).toHaveLength(1);
 		expect(host.emitted.find((event) => event.name === EVENT_NAMES.terminal)?.payload).toMatchObject({ outcome: "completed" });
 		expect(c.requests().filter((request) => request.method === "notification.create_for_surface")).toHaveLength(1);
-		expect(c.requests().find((request) => request.method === "notification.create_for_surface")?.params).toMatchObject({ title: "Pi", body: "Response ready" });
+		expect(c.requests().find((request) => request.method === "notification.create_for_surface")?.params).toMatchObject({ title: "Pi", body: "✓ Completed" });
 		expect(c.requests().filter((request) => (request.params.event as { hook_event_name?: string })?.hook_event_name === "Stop")).toHaveLength(1);
 		const meta = c.lines.filter((line) => line.startsWith("report_meta_block ")).at(-1)!;
 		expect(meta.slice(meta.indexOf(" -- ") + 4).split("\\n")).toEqual(["0", "1", "0", "0", "0", "0", "30", "0.00", "0"]);
@@ -605,7 +605,7 @@ test("native TUI prompt end restores idle or running Pi state", async () => {
 		await host.life("ui_prompt_start", {}, tuiCtx("native-restore"));
 		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Waiting"')));
 		await host.life("ui_prompt_end", {}, tuiCtx("native-restore"));
-		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Writing response"')));
+		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Running"')));
 		await host.life("session_shutdown");
 	} finally {
 		await c.close();
@@ -679,7 +679,7 @@ test("subagent numeric progress writes an actual cmux command", async () => {
 		await waitFor(() =>
 			c.lines.some(
 				(l) =>
-					l === `set_progress 0.25 --label="Source 1/4" --tab=${c.workspaceId}`,
+					l === `set_progress 0.25 --label="Subagents · Running · 1/4 completed" --tab=${c.workspaceId}`,
 			),
 		);
 		p.deactivate();
@@ -926,7 +926,7 @@ test("subagent error terminal alerts", async () => {
 			outcome: "failed",
 		});
 		await waitFor(() =>
-			c.requests().some((r) => r.params.title === "Subagents need attention"),
+			c.requests().some((r) => r.params.title === "Subagents · ✗ Failed"),
 		);
 		p.deactivate();
 		await host.life("session_shutdown");
@@ -958,7 +958,7 @@ test("subagent success coalesces at the first deadline", async () => {
 			outcome: "completed",
 		});
 		await waitFor(
-			() => c.requests().some((r) => r.params.body === "2 completed"),
+			() => c.requests().some((r) => r.params.body === "Subagents · ✓ Completed · 2 completed"),
 			700,
 		);
 		p.deactivate();
@@ -991,7 +991,7 @@ test("error coalesces over success", async () => {
 			outcome: "failed",
 		});
 		await waitFor(() =>
-			c.requests().some((r) => r.params.title === "Subagents need attention"),
+			c.requests().some((r) => r.params.title === "Subagents · ✗ Failed"),
 		);
 		p.deactivate();
 		await host.life("session_shutdown");
@@ -1040,7 +1040,7 @@ test("withdraw cancels pending subagent terminal", async () => {
 		p.withdraw({ version: 2, generation: 0, sequence: 1, source: "subagent" });
 		await new Promise((r) => setTimeout(r, 500));
 		expect(
-			c.requests().some((r) => r.params.title === "Subagents completed"),
+			c.requests().some((r) => r.params.title === "Subagents · ✓ Completed"),
 		).toBe(false);
 		p.deactivate();
 		await host.life("session_shutdown");
@@ -1067,7 +1067,7 @@ test("parent settlement merges child success", async () => {
 		await host.life("agent_end", { messages: [{ stopReason: "stop" }] });
 		await host.life("agent_settled");
 		await waitFor(
-			() => c.requests().some((r) => r.params.title === "Pi response ready"),
+			() => c.requests().some((r) => r.params.title === "Pi · ✓ Completed"),
 			700,
 		);
 		p.deactivate();
@@ -1095,7 +1095,7 @@ test("new subagent generation resets a deferred terminal", async () => {
 		p.publishState(subagent(1, 0));
 		await new Promise((r) => setTimeout(r, 500));
 		expect(
-			c.requests().some((r) => r.params.title === "Subagents completed"),
+			c.requests().some((r) => r.params.title === "Subagents · ✓ Completed"),
 		).toBe(false);
 		p.deactivate();
 		await host.life("session_shutdown");
@@ -1116,7 +1116,7 @@ test("local error notifies after idle", async () => {
 		await host.life("agent_end", { messages: [{ stopReason: "error" }] });
 		await host.life("agent_settled");
 		await waitFor(() =>
-			c.requests().some((r) => r.params.body === "Needs attention"),
+			c.requests().some((r) => r.params.body === "✗ Failed"),
 		);
 		await host.life("session_shutdown");
 	} finally {

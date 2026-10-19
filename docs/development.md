@@ -43,6 +43,7 @@ test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 �
 test/entrypoint.test.ts   — 공개 확장 진입점의 V2/native TUI 등록, continuation settlement exactly-once와 multi-depth nested parent outcome, 실제 producer→bus→consumer 및 fake-socket privacy 테스트
 test/notification-policy.test.ts — exact `subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — 실제 V2 producer→bus→consumer와 fake Unix socket으로 terminal exactly-once, withdrawal, retained-quiet, source failover와 notification/presentation 경계를 검증
+test/presentation.test.ts — 고정 상태 문구·기호, queued/blocked 의미, 집계 summary와 metadata 불변·byte 한도 단위 테스트
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
 test/official-hook.test.ts — marker/부재/override와 non-regular·64 KiB 초과 source의 bounded probe 테스트
 test/runtime-resolution.test.ts — startup resolver, 공식 hook probe deadline·epoch fence, awaitable shutdown observer와 runtime 공유 fingerprint lease gate의 replacement fence 테스트

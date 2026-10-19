@@ -25,7 +25,11 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 수락된 shared presence는 producer가 보낸 label이나 task 내용을 재사용하지 않고
 고정된 local vocabulary와 숫자 집계로 렌더링됩니다. Pi, todo, subagent, input
 표시는 각각 cmux presentation의 역할 이름일 뿐 외부 producer를 식별하거나 제어하는
-권한이 아닙니다.
+권한이 아닙니다. 사람이 읽는 status·progress·집계 summary는 정체성→상태→필요한 숫자 순서를
+따르고, 실행 중 `Running`, 완료 `✓ Completed`, 실패 `✗ Failed`를 사용합니다.
+`Blocked`는 수락된 structured reason, `Queued`는 active가 없는 pending count에서만
+파생하는 표시 전용 문구이며 wire enum이나 metadata를 바꾸지 않습니다. 세부 표시는
+[configuration](configuration.md#local-pi와-interaction-waiting-표시-notification-보존)을 참고하세요.
 
 - assistant response, prompt, raw error, 경로, tool 인수·출력, task text, run ID와
   session ID는 cmux로 복사하지 않습니다.

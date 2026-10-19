@@ -63,7 +63,7 @@ describe("UTF-8 bounded presence text", () => {
       expect(value).not.toContain("�");
     }
     expect(rendered[0][0].endsWith("…")).toBe(true);
-    expect(rendered[1][0]).toBe("worker");
+    expect(rendered[1][0]).toBe("worker · Running");
     expect(rendered[2][0].endsWith("…")).toBe(true);
     expect(rendered[3][0].startsWith("Pi · ")).toBe(true);
     expect([...formatAttentionTitle(event("a".repeat(200)), 96)]).toHaveLength(96);
@@ -81,9 +81,9 @@ describe("UTF-8 bounded presence text", () => {
     const expected = {
       idle: "Idle",
       waiting: "Waiting",
-      running: "Writing response",
-      success: "Response ready",
-      error: "Needs attention",
+      running: "Running",
+      success: "✓ Completed",
+      error: "✗ Failed",
       cancelled: "Cancelled",
     } as const;
 
@@ -134,7 +134,7 @@ describe("UTF-8 bounded presence text", () => {
       counts: { active: 1, completed: 0, failed: 0 },
       usage: undefined,
     };
-    expect(formatStateText(ordinaryTask, 96)).toBe("Ordinary task: waiting · 1 active");
+    expect(formatStateText(ordinaryTask, 96)).toBe("Ordinary task · Waiting · 1 active");
     for (const value of Object.values(expected)) {
       expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(CMUX_TEXT_BYTES.notificationBody);
       expect(value).not.toContain(canary);
@@ -143,7 +143,11 @@ describe("UTF-8 bounded presence text", () => {
   });
 
   test("renders V2 numeric progress without producer text", () => {
-    expect(formatProgressText({ ...event("producer-canary"), progress: { value: 3 / 5, completed: 3, total: 5 } }, 96)).toBe("Source 3/5");
+    const numericProgress = {
+      ...event("Subagents"),
+      progress: { value: 3 / 5, completed: 3, total: 5, label: "producer-canary" },
+    };
+    expect(formatProgressText(numericProgress, 96)).toBe("Subagents · Running · 3/5 completed");
   });
 
   test("selects todo progress before other eligible progress", () => {

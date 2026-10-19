@@ -25,9 +25,9 @@ export const PRESENCE_STATE_STYLES: Record<PresenceUpdate["state"], PresenceStyl
 const LOCAL_TURN_SUMMARIES: Record<PresenceUpdate["state"], string> = {
   idle: "Idle",
   waiting: "Waiting",
-  running: "Writing response",
-  success: "Response ready",
-  error: "Needs attention",
+  running: "Running",
+  success: "✓ Completed",
+  error: "✗ Failed",
   cancelled: "Cancelled",
 };
 
@@ -52,8 +52,9 @@ export function isInteractionWaiting(event: PresenceUpdate): boolean {
 export function formatLocalTurnPresentation(
   state: PresenceUpdate["state"],
   maxCodePoints: number,
+  blocked = false,
 ): LocalTurnPresentation {
-  const body = boundedPresenceText(LOCAL_TURN_SUMMARIES[state], {
+  const body = boundedPresenceText(blocked ? "Blocked" : LOCAL_TURN_SUMMARIES[state], {
     maxBytes: CMUX_TEXT_BYTES.notificationBody,
     maxCodePoints,
   });
@@ -101,11 +102,19 @@ export function presenceStatusKey(sourceId: string, surfaceId?: string): string 
   return `${STATUS_PREFIX}:${hash}`;
 }
 
+/** Display-only refinements never replace the accepted state or attention enums. */
+function stateSummary(event: PresenceUpdate): string {
+  if (event.blocked) return "Blocked";
+  const canBeQueued = event.state === "waiting" || event.state === "running";
+  if (canBeQueued && event.counts.active === 0 && (event.counts.queued ?? 0) > 0) return "Queued";
+  return LOCAL_TURN_SUMMARIES[event.state];
+}
+
 export function formatStateText(event: PresenceUpdate, maxCodePoints: number): string {
-  const parts = [`${event.source.label}: ${event.state}`];
+  const parts = [`${event.source.label} · ${stateSummary(event)}`];
   if (event.counts.active) parts.push(`${event.counts.active} active`);
   if (event.counts.queued) parts.push(`${event.counts.queued} queued`);
-  if (event.counts.completed) parts.push(`${event.counts.completed} done`);
+  if (event.counts.completed) parts.push(`${event.counts.completed} completed`);
   if (event.counts.failed) parts.push(`${event.counts.failed} failed`);
   if (event.counts.cancelled) parts.push(`${event.counts.cancelled} cancelled`);
   if (event.usage?.tokens) parts.push(`${Math.round(event.usage.tokens)} tokens`);
@@ -123,9 +132,10 @@ export function formatStateText(event: PresenceUpdate, maxCodePoints: number): s
 export function formatProgressText(event: PresenceUpdate, maxCodePoints: number): string {
   const progress = event.progress;
   // V2 supplies only bounded numeric progress. Never borrow producer text.
-  const label = progress?.completed !== undefined && progress.total !== undefined
-    ? `Source ${progress.completed}/${progress.total}`
-    : event.source.label;
+  let label = `${event.source.label} · ${stateSummary(event)}`;
+  if (progress?.completed !== undefined && progress.total !== undefined) {
+    label += ` · ${progress.completed}/${progress.total} completed`;
+  }
   return boundedPresenceText(label, {
     maxBytes: CMUX_TEXT_BYTES.v1Text,
     maxCodePoints,
@@ -149,8 +159,9 @@ export function formatParentAttentionFallback(
   failed: number,
   maxCodePoints: number,
 ): { title: string; body: string } {
-  const parts = [`Pi: ${attention}`];
-  if (completed > 0) parts.push(`${completed} done`);
+  const summary = attention === "info" ? "Needs attention" : LOCAL_TURN_SUMMARIES[attention];
+  const parts = [`Pi · ${summary}`];
+  if (completed > 0) parts.push(`${completed} completed`);
   if (failed > 0) parts.push(`${failed} failed`);
   return {
     title: "Pi",
@@ -172,19 +183,12 @@ export function formatSubagentAttention(
   const parts: string[] = [];
   if (completedDelta > 0) parts.push(`${completedDelta} completed`);
   if (failedDelta > 0) parts.push(`${failedDelta} failed`);
-  const summary = parts.join(" · ") || (attention === "error" ? "Subagent task failed" : "Subagent task completed");
-  const title = options.timeout
-    ? "Subagent failed"
-    : options.parentSucceeded && attention === "success"
-      ? "Pi response ready"
-      : attention === "error"
-        ? "Subagents need attention"
-        : "Subagents completed";
-  const body = options.timeout
-    ? `${summary} · Parent is processing results`
-    : options.parentSucceeded && attention === "success" && parts.length > 0
-      ? `Subagents: ${summary}`
-      : summary;
+  const identity = options.parentSucceeded && attention === "success" ? "Pi" : "Subagents";
+  const title = `${identity} · ${LOCAL_TURN_SUMMARIES[attention]}`;
+  let body = `Subagents · ${LOCAL_TURN_SUMMARIES[attention]}`;
+  if (parts.length > 0) body += ` · ${parts.join(" · ")}`;
+  // A deferred timeout snapshot is not evidence that Pi is still running.
+  if (options.timeout) body += " · Deferred summary";
   return {
     title: boundedPresenceText(title, {
       maxBytes: CMUX_TEXT_BYTES.notificationTitle,

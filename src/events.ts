@@ -15,6 +15,8 @@ export interface PresenceUpdate {
   progress?: { value: number; completed?: number; total?: number; label?: string };
   usage?: PresenceUsage;
   attention?: "none" | "info" | "success" | "error";
+  /** Presentation-only blocked marker, including quiet retained snapshots. */
+  blocked?: boolean;
   /** Structured V2 cause retained only for local attention routing. */
   attentionReason?: "failure" | "blocked" | "input_required";
 }
@@ -53,10 +55,12 @@ export function adaptPresenceState(event: PresenceStateV2, local?: Partial<Prese
     ? { value: event.progress.completed / event.progress.total, completed: event.progress.completed, total: event.progress.total }
     : undefined;
   const reason = attentionReason(event);
+  const blocked = event.attention?.reason === "blocked" ? { blocked: true } : {};
   if (event.source === "subagent") {
     const counts = event.subagents ?? { running: 0, cancelling: 0, queued: 0, completed: 0, failed: 0, cancelled: 0, omitted: 0 };
     return {
       generation: event.generation, sequence: event.sequence, source: { ...SUBAGENT_SOURCE }, state,
+      ...blocked,
       counts: { active: counts.running + counts.cancelling, queued: counts.queued, completed: counts.completed, failed: counts.failed, cancelled: counts.cancelled, total: counts.running + counts.cancelling + counts.queued + counts.completed + counts.failed + counts.cancelled + counts.omitted },
       ...(progress ? { progress } : {}), attention: attention(event),
       ...(reason ? { attentionReason: reason } : {}),
@@ -74,6 +78,7 @@ export function adaptPresenceState(event: PresenceStateV2, local?: Partial<Prese
   const overlay = local?.generation === event.generation ? local : {};
   return {
     generation: event.generation, sequence: event.sequence, source: { ...source }, state,
+    ...blocked,
     counts: overlay.counts ?? { active: state === "running" || state === "waiting" ? 1 : 0, completed: state === "success" ? 1 : 0, failed: state === "error" ? 1 : 0 },
     ...(progress ? { progress } : overlay.progress ? { progress: overlay.progress } : {}),
     ...(overlay.usage ? { usage: overlay.usage } : {}), attention: attention(event),
