@@ -26,7 +26,7 @@ pi install -l git:github.com/spi-ca/pi-cmux-presence@v20260907-3
 
 ### 로컬 경로 설치·개발
 
-개발 중에는 현재 디렉터리를 로컬 패키지로 설치할 수 있습니다. Pi는 경로를 복사하지 않고 참조합니다.
+Bun runtime 최소 버전은 `package.json`의 `engines.bun`에 선언된 `>=1.4.2`이며, 개발과 CI는 최신 안정 Bun을 사용합니다. 개발 중에는 현재 디렉터리를 로컬 패키지로 설치할 수 있습니다. Pi는 경로를 복사하지 않고 참조합니다.
 
 ```bash
 bun install --frozen-lockfile
