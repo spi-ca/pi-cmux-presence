@@ -116,10 +116,16 @@ host session ID는 process-local 이벤트와 동일하게 control/bidi 문자�
 | --- | --- | --- | --- |
 | `idle` | `Pi · Idle` | `Pi` | `Idle` |
 | `waiting` | `Pi · Waiting` | `Pi` | `Waiting` |
-| `running` | `Pi · Writing response` | `Pi` | `Writing response` |
-| `success` | `Pi · Response ready` | `Pi` | `Response ready` |
-| `error` | `Pi · Needs attention` | `Pi` | `Needs attention` |
+| `running` | `Pi · Running` | `Pi` | `Running` |
+| `success` | `Pi · ✓ Completed` | `Pi` | `✓ Completed` |
+| `error` | `Pi · ✗ Failed` | `Pi` | `✗ Failed` |
 | `cancelled` | `Pi · Cancelled` | `Pi` | `Cancelled` |
+
+사람이 읽는 표시는 영어 고정 문구로 `정체성 · 상태 · 필요한 숫자` 순서를 사용합니다. 실행 중에는 완료·실패 기호 없이 `Running`으로 표시하고, 완료·실패에만 `✓ Completed`·`✗ Failed`를 사용합니다. 기존 cmux icon token·색상·priority는 유지합니다. 일반 source의 status는 예를 들어 `Subagents · Running · 1 active · 2 queued`, progress label은 `Pi todo · Running · 3/5 completed`입니다. usage 숫자는 task count 뒤에 둡니다.
+
+수락된 structured `blocked` reason은 새 attention과 retained snapshot 모두 `Blocked`로 표시합니다. 기존 error-style·attention policy와 numeric metadata는 바꾸지 않습니다. `waiting` 또는 `running`에 active가 없고 queued count가 있을 때만 `Queued`로 세분화하며, 그 외 waiting과 cancellation은 각각 `Waiting`·`Cancelled`로 유지합니다. 이 문구는 표시 전용이며 shared state·outcome enum, native lifecycle, feed·resume token과 meta block의 아홉 줄 숫자 형식은 그대로입니다.
+
+subagent 집계 notification title은 `Subagents · ✓ Completed` 또는 `Subagents · ✗ Failed`이고, 성공한 부모 settlement와 합쳐질 때는 `Pi · ✓ Completed`입니다. body와 attention log에는 `Subagents · ✗ Failed · 2 completed · 1 failed`처럼 고정 상태와 숫자를 사용합니다. 부모 대기 한도에 도달한 error에는 `Deferred summary`를 덧붙여 지연된 집계임을 표시합니다. 이 알림이 나올 때 부모가 이미 종료됐을 수 있으므로 현재 실행 중이라고 표시하지 않으며, deadline·dispatch 조건은 바꾸지 않습니다. auto-title은 기존 opt-in `Pi · <session name>` 형식을 유지합니다.
 
 고정 `interaction` source의 strict V2 profile(`state: "waiting"`, `interaction: { kind: "ask_user", pending }`, `attention: { reason: "input_required", occurrence }`)과 Pi 0.99.2의 blocking native **TUI** `ui_prompt_start`/`ui_prompt_end` lifecycle은 label·prompt·event title을 사용하지 않고 sidebar에 `Pi needs your input`만 표시합니다. 둘이 겹치면 waiting은 OR로 유지되고 새 notification/flash는 하나만 위 attention gate를 통과합니다. native prompt 종료 뒤에도 V2 `ask_user` wait가 남으면 clear하거나 running으로 복원하지 않습니다. native prompt만 끝난 경우에는 현재 agent lifecycle에 맞춰 running 또는 idle로 복원합니다. non-TUI, 다른 session epoch, replacement, shutdown의 native prompt event는 무시합니다. 이는 모든 Pi input wait 또는 permission wait를 탐지한다는 뜻이 아니며 producer lifecycle·실행·취소 authority를 이 consumer에 주지 않습니다. `occurrence: "new"`의 notification title/body도 같은 고정 문구이고 위 attention gate를 따릅니다. `occurrence: "retained"` replay는 notification·flash·log 없이 표시만 갱신합니다.
 

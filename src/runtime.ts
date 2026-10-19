@@ -996,7 +996,7 @@ export class PresenceRuntime {
     label: string;
   } {
     const localPresentation = event.source.id === LOCAL_SOURCE.id
-      ? formatLocalTurnPresentation(event.state, this.config.maxLabelChars)
+      ? formatLocalTurnPresentation(event.state, this.config.maxLabelChars, event.blocked)
       : null;
     const interactionPresentation = localPresentation === null && isInteractionWaiting(event)
       ? formatInteractionWaitingPresentation(this.config.maxLabelChars)

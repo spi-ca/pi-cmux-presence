@@ -647,8 +647,8 @@ test("successful terminal ordinals form one fixed 450ms count-aware burst", asyn
 		await waitFor(() => notifications(socket.lines).length === 1);
 
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents completed",
-			body: "2 completed",
+			title: "Subagents · ✓ Completed",
+			body: "Subagents · ✓ Completed · 2 completed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -684,8 +684,8 @@ test("failed terminal ordinals form one fixed 100ms burst", async () => {
 
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents need attention",
-			body: "2 failed",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 2 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -737,8 +737,8 @@ test("a terminal accepted during delayed socket startup dispatches after owned o
 		await sessionStart;
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents need attention",
-			body: "1 failed",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -801,7 +801,7 @@ test("slow startup dispatches the settled parent fallback when a deferred child 
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
 			title: "Pi",
-			body: "Response ready",
+			body: "✓ Completed",
 		});
 	} finally {
 		releaseCapabilities?.();
@@ -854,8 +854,8 @@ test("slow startup keeps hard-cap wording when parent settlement re-evaluates de
 		await sessionStart;
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagent failed",
-			body: "1 failed · Parent is processing results",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 1 failed · Deferred summary",
 		});
 	} finally {
 		releaseCapabilities?.();
@@ -898,7 +898,7 @@ test("state-before-terminal uses only the explicit terminal ordinal", async () =
 		clock.advance(450);
 
 		await waitFor(() => notifications(socket.lines).length === 1);
-		expect(notifications(socket.lines)[0]?.params.body).toBe("1 completed");
+		expect(notifications(socket.lines)[0]?.params.body).toBe("Subagents · ✓ Completed · 1 completed");
 		expect(registry.get("subagent")).toBe(retainedState);
 		expect(retainedState?.counts).toMatchObject({ active: 0, completed: 99, failed: 0 });
 	} finally {
@@ -939,8 +939,8 @@ test("same-generation count resets refresh the baseline without cancelling an ac
 		clock.advance(100);
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents need attention",
-			body: "1 failed",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1016,7 +1016,7 @@ test("terminal-before-state remains one failure edge despite later counter state
 		clock.advance(100);
 
 		await waitFor(() => notifications(socket.lines).length === 1);
-		expect(notifications(socket.lines)[0]?.params.body).toBe("1 failed");
+		expect(notifications(socket.lines)[0]?.params.body).toBe("Subagents · ✗ Failed · 1 failed");
 	} finally {
 		await close(runtime, [subagent], socket);
 	}
@@ -1052,7 +1052,7 @@ test("a state-first failure consumed by its terminal leaves a same-generation ne
 		})).toBe(true);
 		clock.advance(100);
 		await waitFor(() => notifications(socket.lines).length === 1);
-		expect(notifications(socket.lines)[0]?.params.body).toBe("1 failed");
+		expect(notifications(socket.lines)[0]?.params.body).toBe("Subagents · ✗ Failed · 1 failed");
 
 		// The preceding terminal consumed the first state-first failure, so it
 		// must not leave a terminal-first tombstone that swallows this new edge.
@@ -1073,7 +1073,7 @@ test("a state-first failure consumed by its terminal leaves a same-generation ne
 		await waitFor(() => notifications(socket.lines).length === 2);
 		expect(notifications(socket.lines)[1]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error · 2 failed",
+			body: "Subagents · ✗ Failed · 2 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1117,7 +1117,7 @@ test("expired terminal-first tombstones allow a later same-generation standalone
 		await waitFor(() => notifications(socket.lines).length === 2);
 		expect(notifications(socket.lines)[1]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error · 1 failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1152,7 +1152,7 @@ test("a quiet same-generation state does not cancel a standalone failure alert",
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error · 1 failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1194,7 +1194,7 @@ test("expired state-first pairing uses its clock deadline before a late terminal
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error · 1 failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 
 		clock.advance(100);
@@ -1242,7 +1242,7 @@ test("expired terminal-first pairing uses its clock deadline before suppressing 
 		expect(notifications(socket.lines).map((notification) => notification.params)).toContainEqual(
 			expect.objectContaining({
 				title: "Subagents",
-				body: "Subagents: error · 1 failed",
+				body: "Subagents · ✗ Failed · 1 failed",
 			}),
 		);
 	} finally {
@@ -1336,8 +1336,8 @@ test("parent success merges a closed child burst into one response-ready notific
 			socket.lines.filter((line) => line.includes("surface.trigger_flash")),
 		).toHaveLength(1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Pi response ready",
-			body: "Subagents: 1 completed",
+			title: "Pi · ✓ Completed",
+			body: "Subagents · ✓ Completed · 1 completed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1367,8 +1367,8 @@ test("active-parent failed terminal has a fixed ten-second deadline and one aler
 		await waitFor(() => notifications(socket.lines).length === 1);
 
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagent failed",
-			body: "1 failed · Parent is processing results",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 1 failed · Deferred summary",
 		});
 
 		await pi.lifecycle("agent_end", { messages: [{ stopReason: "error" }] });
@@ -1584,7 +1584,7 @@ test("local terminal wording is static, settles once, and clears on its final de
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
 			title: "Pi",
-			body: "Needs attention",
+			body: "✗ Failed",
 		});
 		await pi.lifecycle("agent_settled", {}, { isIdle: () => true });
 		expect(notifications(socket.lines)).toHaveLength(1);
@@ -1784,8 +1784,8 @@ test("duplicate terminal event IDs and stale sequences cannot split a single ter
 		await waitFor(() => notifications(socket.lines).length === 1);
 
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents completed",
-			body: "2 completed",
+			title: "Subagents · ✓ Completed",
+			body: "Subagents · ✓ Completed · 2 completed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1824,9 +1824,9 @@ test("matching state-before-terminal subagent failures produce one terminal-coun
 		clock.advance(100);
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents need attention",
+			title: "Subagents · ✗ Failed",
 			// The explicit terminal, never the state counters, owns this count.
-			body: "1 failed",
+			body: "Subagents · ✗ Failed · 1 failed",
 		});
 		clock.advance(1_000);
 		await drainSocketQueue();
@@ -1860,7 +1860,7 @@ test("standalone subagent failure and blocked states each alert once", async () 
 		await waitFor(() => notifications(socket.lines).length === 1);
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error · 4 done · 2 failed",
+			body: "Subagents · ✗ Failed · 4 completed · 2 failed",
 		});
 
 		expect(subagent.publishState(subagentState(4, 0, {
@@ -1879,7 +1879,7 @@ test("standalone subagent failure and blocked states each alert once", async () 
 		await waitFor(() => notifications(socket.lines).length === 2);
 		expect(notifications(socket.lines)[1]?.params).toMatchObject({
 			title: "Subagents",
-			body: "Subagents: error",
+			body: "Subagents · Blocked",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);
@@ -1955,8 +1955,8 @@ test("a failure superseding a success terminal uses the error window and preserv
 		await waitFor(() => notifications(socket.lines).length === 1);
 
 		expect(notifications(socket.lines)[0]?.params).toMatchObject({
-			title: "Subagents need attention",
-			body: "1 completed · 1 failed",
+			title: "Subagents · ✗ Failed",
+			body: "Subagents · ✗ Failed · 1 completed · 1 failed",
 		});
 	} finally {
 		await close(runtime, [subagent], socket);

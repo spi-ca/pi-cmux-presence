@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지는 `package.json`의 `packageManager`에 선언된 `bun@1.3.14`를 사용합니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.3.0`입니다. Pi stack의 caret transitive drift를 막기 위해 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지의 Bun runtime 최소 버전은 `package.json`의 `engines.bun`에 선언된 `>=1.4.2`이며, 개발과 CI는 최신 안정 Bun을 사용합니다. `packageManager` exact pin은 두지 않습니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.3.0`입니다. Pi stack의 caret transitive drift를 막기 위해 일곱 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -43,6 +43,7 @@ test/config.test.ts       — 환경 변수 기본값과 허용 범위 파싱 �
 test/entrypoint.test.ts   — 공개 확장 진입점의 V2/native TUI 등록, continuation settlement exactly-once와 multi-depth nested parent outcome, 실제 producer→bus→consumer 및 fake-socket privacy 테스트
 test/notification-policy.test.ts — exact `subagent` cumulative terminal 판정, `settled` policy matrix, notification/flash policy, 고정 deadline 산술 테스트
 test/runtime-notification-acceptance.test.ts — 실제 V2 producer→bus→consumer와 fake Unix socket으로 terminal exactly-once, withdrawal, retained-quiet, source failover와 notification/presentation 경계를 검증
+test/presentation.test.ts — 고정 상태 문구·기호, queued/blocked 의미, 집계 summary와 metadata 불변·byte 한도 단위 테스트
 test/protocol.test.ts     — V1/V2 codec 인코딩·디코딩과 byte 한도 테스트
 test/official-hook.test.ts — marker/부재/override와 non-regular·64 KiB 초과 source의 bounded probe 테스트
 test/runtime-resolution.test.ts — startup resolver, 공식 hook probe deadline·epoch fence, awaitable shutdown observer와 runtime 공유 fingerprint lease gate의 replacement fence 테스트
@@ -116,13 +117,13 @@ bun run diagram:render
 
 ## 자동 CI 호환성 매트릭스
 
-push와 pull request CI는 provider credential, live cmux socket 또는 acceptance를 사용하지 않습니다. `bun run ci`, `bun pm pack --dry-run`, 그리고 tarball을 격리된 임시 consumer에 lifecycle script 없이 설치해 registration stub으로 import하는 smoke를 실행합니다. smoke는 `KIRO_API_KEY`를 제거하고 `PI_OFFLINE=1`을 설정합니다. 두 lane 모두 선택된 Bun 버전과 `cc` compiler의 위치·버전을 로그로 확인합니다.
+push와 pull request CI는 provider credential, live cmux socket 또는 acceptance를 사용하지 않습니다. `bun run ci`, `bun pm pack --dry-run`, 그리고 tarball을 격리된 임시 consumer에 lifecycle script 없이 설치해 registration stub으로 import하는 smoke를 실행합니다. smoke는 `KIRO_API_KEY`를 제거하고 `PI_OFFLINE=1`을 설정합니다. 세 lane 모두 `setup-bun`의 `bun-version: latest`로 최신 안정 Bun을 선택합니다. 실행 중인 Bun 버전이 setup step의 `bun-version` output과 같은지 확인하고 `Bun.semver`로 `>=1.4.2` 최소 버전을 검사한 뒤, Bun 버전과 `cc` compiler의 위치·버전을 로그로 확인합니다.
 
 | lane | Bun | Pi development graph | install |
 | --- | --- | --- | --- |
-| locked baseline | 1.3.14 (`packageManager`) | exact 1.3.0 lockfile graph | `bun install --frozen-lockfile` |
-| current compatibility | 1.4.2 | installed host와 같은 exact 1.3.0 임시 graph | `bun install --no-save` |
-| legacy compatibility | 1.4.2 | exact 0.85.1 임시 graph | `bun install --no-save` |
+| locked baseline | latest stable (>=1.4.2) | exact 1.3.0 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | latest stable (>=1.4.2) | installed host와 같은 exact 1.3.0 임시 graph | `bun install --no-save` |
+| legacy compatibility | latest stable (>=1.4.2) | exact 0.85.1 임시 graph | `bun install --no-save` |
 
 baseline/current graph는 `@earendil-works/`의 `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-coding-agent`, `pi-mcp`, `pi-telemetry`, `pi-tui`입니다. current runtime에 없는 `chord`/`pi-client`/`pi-protocol`을 요구하지 않습니다. legacy graph는 `chord`, `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-telemetry`, `pi-tui`입니다. `pi-client`/`pi-protocol`은 legacy host에서도 개발 전용 패키지이므로 주입하지 않습니다. legacy lane은 optional peer를 쓰는 기존 host의 회귀를 확인하기 위한 것이며, `agent_settled` 없는 host를 지원하는 code workaround가 아닙니다.
 

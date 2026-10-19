@@ -26,7 +26,7 @@ pi install -l git:github.com/spi-ca/pi-cmux-presence@v20260907-3
 
 ### 로컬 경로 설치·개발
 
-개발 중에는 현재 디렉터리를 로컬 패키지로 설치할 수 있습니다. Pi는 경로를 복사하지 않고 참조합니다.
+Bun runtime 최소 버전은 `package.json`의 `engines.bun`에 선언된 `>=1.4.2`이며, 개발과 CI는 최신 안정 Bun을 사용합니다. 개발 중에는 현재 디렉터리를 로컬 패키지로 설치할 수 있습니다. Pi는 경로를 복사하지 않고 참조합니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -52,7 +52,7 @@ pi install -l /absolute/path/to/pi-cmux-presence
 - 외부 producer는 선택 사항입니다. `pi-subagent`는 이 패키지가 import하거나 제어하지 않는 별도 package이며, 같은 Pi runtime의 shared presence를 이 consumer가 cmux에 선택적으로 투영합니다. subagent completion은 한 번의 누적 attention으로 묶을 수 있습니다. 상세 경계는 [`docs/pi-subagent-integration.md`](docs/pi-subagent-integration.md)를 참고하세요.
 - input-required projection은 고정 문구 `Pi needs your input`만 표시합니다. 새 attention만 기존 log/notification/flash gate를 따르고 retained 표시 갱신은 status-only입니다. 이는 모든 Pi 입력 대기를 감지하거나 producer 실행·취소 권한을 얻는 기능이 아닙니다. 상세 경계는 [`docs/event-contract.md`](docs/event-contract.md)를 참고하세요.
 - 검토한 외부 cmux child profile은 정확히 `PI_CMUX_PROFILE=subagent-child-v1`일 때만 인식합니다. 이 profile과 정확한 `PI_CMUX_NOTIFY_LEVEL=disabled` 또는 `PI_CMUX_SIDEBAR_FLASH=disabled` 조합은 각각 native notification 또는 native flash만 억제하고, sidebar status·progress·log는 유지합니다. 이는 환경 호환 경계일 뿐 dependency나 child lifecycle authority가 아닙니다. 세부 precedence는 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
-- local Pi sidebar는 상태별로 `Pi · Idle`/`Waiting`/`Writing response`/`Response ready`/`Needs attention`/`Cancelled`의 canonical fixed wording을 사용합니다. native notification은 title `Pi`와 같은 summary body를 사용하며, terminal sidebar는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지웁니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
+- local Pi sidebar는 `Pi · Idle`/`Waiting`/`Running`/`✓ Completed`/`✗ Failed`/`Cancelled`의 고정 문구를 사용합니다. 일반 status·progress·집계 summary도 정체성→상태→숫자 순서를 따르며, 근거가 있는 `Blocked`·`Queued`를 구분합니다. wire state와 metadata는 바꾸지 않습니다. 정확한 표시 예시는 [`docs/configuration.md`](docs/configuration.md#local-pi와-interaction-waiting-표시-notification-보존)를 참고하세요. native notification은 title `Pi`와 같은 summary body를 사용하며, terminal sidebar는 `PI_CMUX_PRESENCE_FINAL_CLEAR_MS` 뒤 지웁니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
 - `PI_CMUX_PRESENCE_NOTIFY_POLICY`의 기본값은 계속 `background`입니다. opt-in `settled`는 local success/error와 external error를 notification으로 허용하고 일반 external info/success는 허용하지 않습니다. 단, 성공한 부모 settlement와 exact `subagent` 성공 집계가 병합된 결과는 finalized local completion으로 취급합니다. official hook precedence 뒤 child channel suppression, legacy kill switch, policy, V2 capability가 모두 gate합니다.
 - local Pi와 `subagent` terminal의 `cancelled` outcome은 status-only입니다. permissive policy여도 notification·flash를 만들지 않습니다.
 
@@ -83,7 +83,7 @@ V1의 workspace 대상은 항상 `--tab=<CMUX_WORKSPACE_ID>`입니다. `set_stat
 
 내장 Pi와 todo의 기본 상태 출력은 필요한 숫자 summary만 사용합니다. todo의 untrusted `params`·`error` 검사는 두 필드 합산 1,024 visited values로 제한하고 cycle·반복 object/array alias를 거부합니다. local Pi sidebar/notification에는 assistant response body·preview, 사용자 프롬프트, raw error, 파일 경로, 도구 인수·출력, task 설명·제목, credential을 수집하거나 소켓으로 보내지 않습니다.
 
-이 consumer는 `Pi`, `Pi todo`, `Subagents`, `Input`과 `Source completed/total` 같은 fixed text만 표시하며 producer label·task text·session ID·경로·prompt·run ID는 cmux로 복사하지 않습니다.
+이 consumer는 `Pi`, `Pi todo`, `Subagents`, `Input`의 고정 역할 이름·상태 문구와 `3/5 completed` 같은 숫자만 표시하며 producer label·task text·session ID·경로·prompt·run ID는 cmux로 복사하지 않습니다.
 
 비기본 기능(`PI_CMUX_PRESENCE_FEED`, `PI_CMUX_PRESENCE_META_BLOCK`, `PI_CMUX_PRESENCE_AUTO_TITLE`, `PI_CMUX_PRESENCE_RESUME_FALLBACK`)은 명시적으로 opt-in해야 추가 데이터(feed의 session/tool 식별자와 cmux가 이미 제공한 `_source`·workspace/surface ID, meta block의 숫자 집계, auto-title의 session name, resume fallback의 checkpoint ID)를 cmux에 보냅니다. 어느 것도 프롬프트나 tool 인수·결과는 넣지 않습니다. 각 기능이 정확히 보내는 필드와 token 형식 제약은 [`docs/configuration.md`](docs/configuration.md)를 참고하세요.
 
