@@ -1,5 +1,9 @@
 # 변경 이력
 
+## 미출시
+
+- Pi 개발 의존성·lockfile·baseline/current CI graph를 exact `1.4.0`으로 갱신했습니다. legacy CI lane, optional peer, `@pi/presence` Git pin과 observer-only socket 동작은 유지합니다.
+
 ## v20261016-1
 
 - Pi 개발 의존성·lockfile·baseline/current CI graph를 exact `1.3.0`으로 갱신했습니다. `@pi/presence` Git pin, shared protocol과 socket-only runtime 동작은 유지합니다.
