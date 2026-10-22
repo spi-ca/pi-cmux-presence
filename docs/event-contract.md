@@ -44,7 +44,7 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 ## Pi host lifecycle 관찰
 
-개발·current CI graph는 installed Pi `1.3.0`와 exact 동기화하며,
+개발·current CI graph는 installed Pi `1.4.0`와 exact 동기화하며,
 `0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
 low-level run의 경계이므로 retry, compaction recovery, queued work 또는
 `agent_before_settle` continuation 뒤의 `agent_settled`까지 부모 activity와 usage를
