@@ -591,26 +591,33 @@ test("native TUI and V2 ask_user waiting share one private lifecycle", async () 
 		await c.close();
 	}
 });
-test("native TUI prompt end restores idle or running Pi state", async () => {
-	const c = await cmux();
-	try {
-		const host = pi();
-		extension(host.api as never);
-		await host.life("session_start", {}, ctx("native-restore"));
-		await host.life("ui_prompt_start", {}, tuiCtx("native-restore"));
-		await host.life("ui_prompt_end", {}, tuiCtx("native-restore"));
-		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Idle"')));
+for (const kind of ["select", "custom"] as const) {
+	test(`TUI ${kind} prompt span restores idle or running Pi state without native blocked metadata`, async () => {
+		const c = await cmux();
+		try {
+			const host = pi();
+			extension(host.api as never);
+			const context = tuiCtx("native-restore");
+			// Custom/overlay spans carry no native blocked or visibility metadata.
+			const event = { reason: "ui_prompt", kind, title: "UI_SPAN_TITLE_CANARY" };
+			await host.life("session_start", {}, ctx("native-restore"));
+			await host.life("ui_prompt_start", event, context);
+			await waitFor(() => c.lines.some((line) => line.includes("Pi needs your input")));
+			await host.life("ui_prompt_end", { reason: "ui_prompt" }, context);
+			await waitFor(() => c.lines.some((line) => line.includes('"Pi · Idle"')));
 
-		await host.life("agent_start");
-		await host.life("ui_prompt_start", {}, tuiCtx("native-restore"));
-		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Waiting"')));
-		await host.life("ui_prompt_end", {}, tuiCtx("native-restore"));
-		await waitFor(() => c.lines.some((line) => line.includes('"Pi · Running"')));
-		await host.life("session_shutdown");
-	} finally {
-		await c.close();
-	}
-});
+			await host.life("agent_start");
+			await host.life("ui_prompt_start", event, context);
+			await waitFor(() => c.lines.some((line) => line.includes('"Pi · Waiting"')));
+			await host.life("ui_prompt_end", { reason: "ui_prompt" }, context);
+			await waitFor(() => c.lines.some((line) => line.includes('"Pi · Running"')));
+			expect(c.lines.join("\n")).not.toContain("UI_SPAN_TITLE_CANARY");
+			await host.life("session_shutdown");
+		} finally {
+			await c.close();
+		}
+	});
+}
 test("native prompt end is fenced to its replacement session", async () => {
 	const c = await cmux();
 	try {

@@ -266,7 +266,7 @@ export class PresenceRuntime {
   private attentionOutputReady = false;
   /** One current local terminal is enough to reconcile a delayed session setup. */
   private pendingLocalTerminalAttention: PendingLocalTerminalAttention | null = null;
-  /** Synchronous, local-only state for Pi's blocking TUI prompt lifecycle. */
+  /** Synchronous, local-only state for Pi's broad TUI UI-prompt span. */
   private nativePrompt: NativePrompt | null = null;
   /** One native prompt may defer its fixed input attention until owned output is ready. */
   private pendingNativePromptAttention = false;
@@ -528,8 +528,9 @@ export class PresenceRuntime {
   }
 
   /**
-   * Observe only Pi's native blocking TUI prompt lifecycle. Event title and
-   * kind are intentionally neither retained nor rendered.
+   * Observe Pi's broad TUI UI-prompt span, including custom/overlay UI.
+   * This is not native OSC 7501 blocked or proof of actual input waiting.
+   * Event title and kind are intentionally neither retained nor rendered.
    */
   handleUiPromptStart(_event: unknown, context: unknown): void {
     const sessionId = this.tuiSessionId(context);

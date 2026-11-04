@@ -2,7 +2,11 @@
 
 ## 미출시
 
-- Pi 개발 의존성·lockfile·baseline/current CI graph를 exact `1.4.0`으로 갱신했습니다. legacy CI lane, optional peer, `@pi/presence` Git pin과 observer-only socket 동작은 유지합니다.
+## [0.1.1]
+
+- Pi 개발 의존성·lockfile·baseline/current CI graph를 `pi-schema`를 포함한 exact `1.5.0`으로 갱신했습니다. legacy CI lane, optional peer, `@pi/presence` Git pin과 observer-only socket 동작은 유지합니다.
+- package version을 `0.1.1`로 올리고 Pi의 native extension-update reader가 인식하는 semver heading을 추가했습니다. 기존 날짜 기반 이력은 유지합니다.
+- TUI UI-prompt span은 custom/overlay도 포함하는 넓은 관찰이며 Pi 1.5의 visible inline native `blocked` opt-in과 동치가 아님을 주석과 문서에 명시했습니다. 자체 OSC 전송이나 producer 옵션 변경은 추가하지 않습니다.
 
 ## v20261016-1
 
