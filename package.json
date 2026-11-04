@@ -1,6 +1,6 @@
 {
   "name": "pi-cmux-presence",
-  "version": "0.1.1",
+  "version": "2026.1104.2",
   "description": "Socket-only cmux presence observer for Pi",
   "private": true,
   "type": "module",
