@@ -2,6 +2,11 @@
 
 ## 미출시
 
+## [2026.1104.2]
+
+- package version을 날짜 기반 SemVer(dateSemVer) `YYYY.MMDD.N` 형식의 `2026.1104.2`로 정규화했습니다. `MMDD`는 선행 0 없는 정수이며, `N`은 해당 날짜의 릴리스 순번입니다. 계획된 GitHub tag는 `v20261104-2`이고, Pi native extension-update reader는 위 SemVer heading을 읽습니다.
+- 기존 `0.1.1`과 날짜 tag 이력은 유지합니다. 이번 변경은 버전 메타데이터와 변경 이력만 정규화하며, Pi host dependency graph·runtime·protocol·`@pi/presence` Git pin은 변경하지 않습니다.
+
 ## [0.1.1]
 
 - Pi 개발 의존성·lockfile·baseline/current CI graph를 `pi-schema`를 포함한 exact `1.5.0`으로 갱신했습니다. legacy CI lane, optional peer, `@pi/presence` Git pin과 observer-only socket 동작은 유지합니다.
