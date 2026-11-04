@@ -44,7 +44,7 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 ## Pi host lifecycle 관찰
 
-개발·current CI graph는 installed Pi `1.4.0`와 exact 동기화하며,
+개발·current CI graph는 `pi-schema`를 포함해 installed Pi `1.5.0`와 exact 동기화하며,
 `0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
 low-level run의 경계이므로 retry, compaction recovery, queued work 또는
 `agent_before_settle` continuation 뒤의 `agent_settled`까지 부모 activity와 usage를
@@ -59,6 +59,18 @@ Pi `1.1.0`의 `agent_settled.aborted === true`는 마지막 assistant 상태와 
 기존 `cancelled` outcome으로 처리합니다. 필드가 없는 이전 이벤트는 기존 파생 판정을
 유지하며, 취소는 여전히 status-only입니다. 부모 취소는 별도 subagent job의 취소
 권한이나 shared protocol 변경을 뜻하지 않습니다.
+
+TUI context의 `ui_prompt_start`/`ui_prompt_end`는 `select`·`confirm`·`input`·`editor`와
+`custom`의 넓은 UI span을 관찰합니다. nested/overlapping prompt는 host가 하나의 outer
+span으로 합치며, custom/overlay도 포함합니다. 이 consumer는 span 동안 기존 고정 waiting
+표시를 유지하고 title·kind를 보관·전송하지 않습니다. 이 이벤트만으로 실제 사용자 답변 대기,
+component visibility 또는 native `blocked` opt-in 여부를 판별하지 않습니다.
+
+Pi 1.5의 inline `ctx.ui.custom()`은 기본적으로 OSC 7501 `blocked`를 보고하지 않습니다.
+답변을 기다리는 UI producer가 별도로 `blocked: { kind, message }`를 opt-in해야 하며,
+`kind`는 `question`·`permission`·`auth`입니다. native 보고는 현재 보이는 inline dialog에
+따르고 overlay는 이 옵션을 무시합니다. 따라서 위 observer span은 native `blocked`와
+동치가 아니며, 이 consumer는 producer 옵션을 추가·변경하거나 그 권한을 대신 갖지 않습니다.
 
 Pi 자체 OSC 7501 program status는 별도 터미널 기능입니다. 이 consumer는 이를
 중복 송신하거나 socket projection을 대체하지 않습니다. tmux/screen 경로에서는 Pi의
