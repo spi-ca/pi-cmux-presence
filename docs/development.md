@@ -2,7 +2,7 @@
 
 ## 도구와 타입 경로
 
-이 패키지의 Bun runtime 최소 버전은 `package.json`의 `engines.bun`에 선언된 `>=1.4.2`이며, 개발과 CI는 최신 안정 Bun을 사용합니다. `packageManager` exact pin은 두지 않습니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 현재 `bun.lock`의 Pi runtime graph는 installed host와 같은 exact `1.5.0`입니다. Pi stack의 transitive drift를 막기 위해 `pi-schema`를 포함한 여덟 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
+이 패키지의 Bun runtime 최소 버전은 `package.json`의 `engines.bun`에 선언된 `>=1.4.2`이며, 개발과 CI는 최신 안정 Bun을 사용합니다. `packageManager` exact pin은 두지 않습니다. Pi 타입은 devDependency `@earendil-works/pi-coding-agent`의 `node_modules` 설치본에서 해석됩니다. 개발 의존성과 `bun.lock`의 Pi runtime graph는 exact `1.5.1`이며 current compatibility CI는 별도로 exact `1.6.0`을 검사합니다. Pi stack의 transitive drift를 막기 위해 `pi-schema`를 포함한 여덟 `pi-*` runtime package를 모두 exact devDependency로 고정하며 Pi 1.2 runtime에서 제거된 `chord`는 선언하지 않습니다. host-provided package를 runtime dependency로 bundle하지 않습니다. 반면 optional peer dependency는 `*`이므로 소비자의 Pi 최소 버전을 메타데이터로 강제하지 않습니다.
 
 ```bash
 bun install --frozen-lockfile
@@ -88,7 +88,7 @@ bun run diagram:render
 - 검토한 child profile은 정확한 `PI_CMUX_PROFILE=subagent-child-v1`와 channel별 exact disable만 해석합니다. partial·malformed `PI_CMUX_*` 값이나 `PI_CMUX_SIDEBAR_SOURCE`로 다른 suppression을 추론하지 않고, sidebar/status·progress·log를 끄지 않습니다.
 - local Pi 및 `subagent` terminal의 `cancelled` outcome은 status-only입니다. `all`/`attention` policy에서도 notification·flash·attention log로 승격하지 않습니다.
 - local Pi sidebar/notification은 canonical fixed summary만 사용합니다. assistant response body·preview, prompt, raw error, path, tool argument/output을 새 전송 text로 추가하지 않으며 terminal sidebar는 `finalClearMs` 뒤 clear합니다. notification 보존과 focused-banner suppression은 cmux 소유입니다.
-- TUI `ui_prompt_start`/`ui_prompt_end`의 넓은 span 관찰은 custom/overlay도 포함하며 Pi 1.5의 visible inline `ctx.ui.custom(..., { blocked })` OSC 7501 보고와 동치가 아닙니다. producer의 native `blocked` opt-in을 추론·변경하거나 자체 OSC를 보내지 않습니다. 상세 경계는 [`event-contract.md`](event-contract.md#pi-host-lifecycle-관찰)를 따릅니다.
+- TUI `ui_prompt_start`/`ui_prompt_end`의 넓은 span 관찰은 custom/overlay도 포함하며 Pi 1.5.1의 inline 가시성 또는 overlay 수명에 따른 `ctx.ui.custom(..., { blocked })` OSC 7501 보고와 동치가 아닙니다. producer의 native `blocked` opt-in을 추론·변경하거나 자체 OSC를 보내지 않습니다. 상세 경계는 [`event-contract.md`](event-contract.md#pi-host-lifecycle-관찰)를 따릅니다.
 - shared input-required의 고정 `Pi needs your input` 표시는 shared contract가 유효한 해당 input state에만 적용합니다. label·prompt 등 producer payload를 새 cmux text에 넣지 않습니다. 새 attention만 기존 gate를 따르고 retained 표시 갱신은 status-only입니다. 이 표시를 모든 Pi input wait의 감지나 producer lifecycle/실행/취소 authority로 확장하지 않습니다.
 - feed, meta block, auto-title, resume fallback은 opt-in 데이터 경로입니다. feed의 detached startup queue만 32 edge로 bounded하며 overflow는 그 epoch의 feed를 fail-close해 출력하지 않습니다. readiness는 snapshot을 한 JavaScript turn 안에 client의 bounded socket queue로 순서 제출하고 local queue를 끝내며, 이후 edge는 local buffering 없이 client queue로 직접 보냅니다. transport queue에서 feed는 key로 병합하지 않는 FIFO·낮은 우선순위 항목입니다. 포화하면 새 feed는 버리되, primary 출력은 대기 feed보다 앞서거나 가장 최근 feed를 교체할 수 있습니다. generic presence update나 `pi-subagent` producer를 추가해도 이 기능이나 live cmux mutation/focus 제어를 암묵적으로 활성화하지 않습니다. 새 필드나 메서드는 protocol allowlist와 개인정보 문서를 함께 검토합니다.
 - awaited shutdown은 정상 hook 경로만 보호합니다. crash·`SIGKILL` 뒤 stale status를 처리하는 persisted cross-process reconciliation은 현재 없으며, lease/TTL 또는 owner 기반 recovery는 향후 설계 후보이지 구현 불변 조건이 아닙니다.
@@ -122,8 +122,8 @@ push와 pull request CI는 provider credential, live cmux socket 또는 acceptan
 
 | lane | Bun | Pi development graph | install |
 | --- | --- | --- | --- |
-| locked baseline | latest stable (>=1.4.2) | exact 1.5.0 lockfile graph | `bun install --frozen-lockfile` |
-| current compatibility | latest stable (>=1.4.2) | installed host와 같은 exact 1.5.0 임시 graph | `bun install --no-save` |
+| locked baseline | latest stable (>=1.4.2) | exact 1.5.1 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | latest stable (>=1.4.2) | exact 1.6.0 임시 graph | `bun install --no-save` |
 | legacy compatibility | latest stable (>=1.4.2) | exact 0.85.1 임시 graph | `bun install --no-save` |
 
 baseline/current graph는 `@earendil-works/`의 `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-coding-agent`, `pi-mcp`, `pi-schema`, `pi-telemetry`, `pi-tui`입니다. current runtime에 없는 `chord`/`pi-client`/`pi-protocol`을 요구하지 않습니다. legacy graph는 `chord`, `pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-telemetry`, `pi-tui`입니다. `pi-client`/`pi-protocol`은 legacy host에서도 개발 전용 패키지이므로 주입하지 않습니다. legacy lane은 optional peer를 쓰는 기존 host의 회귀를 확인하기 위한 것이며, `agent_settled` 없는 host를 지원하는 code workaround가 아닙니다.

@@ -2,6 +2,12 @@
 
 ## 미출시
 
+## [2026.1121.1]
+
+- 패키지 버전 `2026.1121.1`에 대응하는 릴리스 태그는 `v20261121-1`입니다.
+- 개발 의존성·lockfile은 exact Pi `1.5.1`로 맞추고, current compatibility CI에서는 전체 여덟 Pi runtime package를 exact `1.6.0`으로 검사합니다. optional peer·`@pi/presence` Git pin·legacy CI lane은 유지합니다.
+- Pi `1.5.1`의 native `blocked` overlay 동작과 TUI 입력 대기 span 관찰의 차이를 문서에 반영했습니다. socket-only 동작과 공유 protocol은 바뀌지 않습니다.
+
 ## [2026.1104.2]
 
 - package version을 날짜 기반 SemVer(dateSemVer) `YYYY.MMDD.N` 형식의 `2026.1104.2`로 정규화했습니다. `MMDD`는 선행 0 없는 정수이며, `N`은 해당 날짜의 릴리스 순번입니다. 계획된 GitHub tag는 `v20261104-2`이고, Pi native extension-update reader는 위 SemVer heading을 읽습니다.

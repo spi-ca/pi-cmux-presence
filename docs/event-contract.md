@@ -44,8 +44,8 @@ lifecycle과 terminal batching을 구현하거나 해석하는 권위는 공유 
 
 ## Pi host lifecycle 관찰
 
-개발·current CI graph는 `pi-schema`를 포함해 installed Pi `1.5.0`와 exact 동기화하며,
-`0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
+`pi-schema`를 포함한 개발 graph는 exact Pi `1.5.1`이며 current compatibility CI는
+exact `1.6.0`을 검사합니다. `0.85.1`은 별도 legacy compatibility lane으로 유지합니다. Pi의 `agent_end`는
 low-level run의 경계이므로 retry, compaction recovery, queued work 또는
 `agent_before_settle` continuation 뒤의 `agent_settled`까지 부모 activity와 usage를
 유지합니다. terminal·completion attention·feed `Stop`·final clear는 settlement에서만
@@ -66,11 +66,17 @@ span으로 합치며, custom/overlay도 포함합니다. 이 consumer는 span �
 표시를 유지하고 title·kind를 보관·전송하지 않습니다. 이 이벤트만으로 실제 사용자 답변 대기,
 component visibility 또는 native `blocked` opt-in 여부를 판별하지 않습니다.
 
-Pi 1.5의 inline `ctx.ui.custom()`은 기본적으로 OSC 7501 `blocked`를 보고하지 않습니다.
+Pi 1.5.1의 `ctx.ui.custom()`은 기본적으로 OSC 7501 `blocked`를 보고하지 않습니다.
 답변을 기다리는 UI producer가 별도로 `blocked: { kind, message }`를 opt-in해야 하며,
-`kind`는 `question`·`permission`·`auth`입니다. native 보고는 현재 보이는 inline dialog에
-따르고 overlay는 이 옵션을 무시합니다. 따라서 위 observer span은 native `blocked`와
-동치가 아니며, 이 consumer는 producer 옵션을 추가·변경하거나 그 권한을 대신 갖지 않습니다.
+`kind`는 `question`·`permission`·`auth`입니다. inline 컴포넌트는 현재 보이는 동안만
+blocked 후보가 됩니다. overlay도 이 옵션을 지원하며 표시된 시점부터 `done()`까지
+`setHidden()`으로 숨거나 다른 overlay에 가려져도 blocked를 유지합니다. 여러 blocking
+prompt가 열려 있으면 가장 최근에 표시된 prompt가 `kind`와 `message`를 제공하고,
+하나를 닫아도 나머지 prompt의 blocked는 유지됩니다. `/reload`와 세션 전환은 숨은 것을
+포함한 모든 extension overlay를 제거·dispose하지만 Pi 자체 overlay는 유지합니다.
+이는 [Pi 1.5.1 호스트 계약](https://github.com/earendil-works/pi/blob/v1.5.1/packages/coding-agent/docs/tui.md#use-custom-screens-and-overlays)입니다.
+위 observer span은 native `blocked`와 동치가 아니며, 이 consumer는 producer 옵션을
+추가·변경하거나 그 권한을 대신 갖지 않습니다.
 
 Pi 자체 OSC 7501 program status는 별도 터미널 기능입니다. 이 consumer는 이를
 중복 송신하거나 socket projection을 대체하지 않습니다. tmux/screen 경로에서는 Pi의
